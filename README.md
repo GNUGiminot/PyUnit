@@ -1,5 +1,16 @@
 # PyUnit
 
+> **Fork of [xatang/PyUnit](https://github.com/xatang/PyUnit)** — all credit for the firmware goes to the original author.
+> This fork adds a dial-gauge UI, a drying counter, a PWA and safety fixes for the heater control.
+> The changes are published here only and are **not** submitted upstream.
+>
+> **Форк [xatang/PyUnit](https://github.com/xatang/PyUnit)** — прошивка и вся основа принадлежат оригинальному автору.
+> Здесь добавлены: новый интерфейс с кольцевыми шкалами, счётчик сушек, PWA и исправления безопасности управления нагревом.
+> Доработки публикуются только в этом репозитории и автору оригинала не отправляются.
+>
+> Что именно изменено — в каталоге [`companion/`](companion/README.md) и в коммитах ветки; бэкенд-правки — в `api/`.
+> The upstream repository does not declare a license / в оригинальном репозитории лицензия не указана.
+
 ![Docker Build](https://github.com/xatang/PyUnit/actions/workflows/docker-build.yml/badge.svg)
 ![Docker Pulls](https://img.shields.io/docker/pulls/xatang/pyunit)
 ![Docker Image Size](https://img.shields.io/docker/image-size/xatang/pyunit/latest)
