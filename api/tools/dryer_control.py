@@ -338,8 +338,27 @@ class Heater_control(object):
         self.is_on = await self._is_on_status(result['power'])
 
     async def set(self, target: float):
-        await self._ensure_initialized()
         heater_name = " ".join(self.heater.name.split(" ")[1:])
+        # FIX: выключение должно проходить всегда, минуя _ensure_initialized().
+        # Раньше аварийное отключение вызывало _get_max_temp() -> запрос к
+        # Moonraker; если связи нет (а это и есть причина аварии), запрос падал,
+        # исключение глоталось в _on_data_error, и нагрев НЕ выключался.
+        if target == 0:
+            if self.target != 0:
+                await self.moonraker_api.send_gcode(
+                    gcode=f"SET_HEATER_TEMPERATURE HEATER={heater_name} TARGET=0"
+                )
+                logger.info("Heater OFF name=%s", self.heater.name)
+            return
+        await self._ensure_initialized()
+        # FIX: без известного предела не греем вообще (раньше сравнение
+        # `target <= None` бросало TypeError и роняло весь цикл обновления).
+        if self.max_temperature is None:
+            logger.error(
+                "Heater max_temp unknown name=%s -> heating refused (target=%s)",
+                self.heater.name, target
+            )
+            return
         if target <= self.max_temperature and self.target != target:
             gcode = f"SET_HEATER_TEMPERATURE HEATER={heater_name} TARGET={target}"
             await self.moonraker_api.send_gcode(gcode=gcode)
@@ -523,6 +542,14 @@ class Dryer_control(object):
         self.temperature_and_humidity: Optional[Temperature_and_humidity_control] = None
         # Servo control hysteresis helpers
         self._servo_last_action: Optional[datetime] = None
+        # FIX: сериализует цикл воркера и команды из HTTP-эндпоинтов.
+        # Без него Stop/Start посреди _apply_actuator_targets обнулял
+        # current_preset / heater_pid, и следующая же строка падала с
+        # "'NoneType' object has no attribute 'storage_type'".
+        # Лок НЕ реентерабельный: берётся только на внешних входах
+        # (update_status и set_status_external), внутренние вызовы
+        # set_status() из _apply_actuator_targets его не трогают.
+        self._lock = asyncio.Lock()
         logger.info("Dryer instance created id=%s status=%s", self.id, self.status)
 
     async def initialize(self):
@@ -546,6 +573,17 @@ class Dryer_control(object):
             logger.info("Dryer initialize done id=%s servo=%s led=%s heater=%s", self.id, self.servo.servo.name, self.led.led.name, self.heater.heater.name)
 
     async def update_status(self, fast: bool = True) -> json:
+        """Внешняя точка входа воркера. Тело вынесено, чтобы взять лок,
+        не переписывая отступы всего метода."""
+        async with self._lock:
+            return await self._update_status_impl(fast)
+
+    async def set_status_external(self, status: dryer_schema.DryerLogStatus, preset: preset_schema.Preset = None):
+        """Смена статуса из HTTP-эндпоинта — под тем же локом, что и цикл."""
+        async with self._lock:
+            await self.set_status(status, preset)
+
+    async def _update_status_impl(self, fast: bool = True) -> json:
         logger.debug("Dryer update_status start id=%s fast=%s status=%s preset=%s", self.id, fast, self.status, getattr(self.current_preset, 'id', None))
         if fast == True:
             url = f"{self.moonraker_api.url}/printer/objects/query?{self.dryer_config.config.servo.name}&{self.dryer_config.config.led.name}&{self.dryer_config.config.heater.name}&{self.dryer_config.config.heater.fan_name}&{self.dryer_config.config.temperature.sensor_name}&"
@@ -681,7 +719,14 @@ class Dryer_control(object):
             if self.temperature_and_humidity.temperature <= 50:
                 await self.led.set_pixel_color(3, *self.led.default_color)
             else:
-                await self.led.set_pixel_color(3, (self.heater.temperature/(self.heater.max_temperature/100))/100, 0, 0)
+                # FIX: max_temperature может быть None (Moonraker недоступен на
+                # старте) или 0 -> ZeroDivisionError/TypeError валил весь цикл
+                # обновления из-за подсветки.
+                if self.heater.max_temperature and self.heater.temperature is not None:
+                    level = max(0.0, min(1.0, self.heater.temperature / self.heater.max_temperature))
+                    await self.led.set_pixel_color(3, level, 0, 0)
+                else:
+                    await self.led.set_pixel_color(3, *self.led.default_color)
         logger.debug("LED update applied id=%s leds_on=%s heater_on=%s fan=%s servo_open=%s", self.id, leds_is_on, self.heater.is_on, self.heater.fan.is_run, self.servo.desired_is_open)
 
     async def _apply_actuator_targets(self):
@@ -691,12 +736,26 @@ class Dryer_control(object):
             if self.heater.is_on == True:
                 logger.info("Heater off due to PENDING id=%s", self.id)
                 await self.heater.set(0)
-        elif self.status == dryer_schema.DryerLogStatus.DRYING:
-            max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
-            if max_temperature > self.heater.max_temperature:
-                max_temperature = self.heater.max_temperature
-            if self.heater_pid == None:
-                self.heater_pid = Heater_PID(max_temperature)
+            return
+        # FIX: страховка от рассинхрона состояния — любой не-PENDING режим
+        # обязан иметь пресет. Раньше отсутствие пресета роняло цикл.
+        if self.current_preset is None:
+            logger.warning("Actuators skipped: no preset id=%s status=%s -> PENDING", self.id, self.status)
+            await self.set_status(dryer_schema.DryerLogStatus.PENDING)
+            return
+        # FIX: единая точка расчёта потолка + гарантия, что PID существует
+        # в любом рабочем режиме (раньше HUMIDITY_STORAGE/TIMER_DRYING могли
+        # обратиться к self.heater_pid == None после Start/Stop не вовремя).
+        max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
+        if self.heater.max_temperature is None:
+            logger.error("Heater max_temp unknown id=%s -> actuators skipped", self.id)
+            return
+        if max_temperature > self.heater.max_temperature:
+            max_temperature = self.heater.max_temperature
+        if self.heater_pid is None:
+            self.heater_pid = Heater_PID(max_temperature)
+
+        if self.status == dryer_schema.DryerLogStatus.DRYING:
             await self.heater_pid.update(self.current_preset.temperature, max_temperature=max_temperature)
             await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
             await self._servo_control()
@@ -733,6 +792,9 @@ class Dryer_control(object):
                     await self.servo.open()
                 else:
                     await self.servo.close()
+            if self.time_drying_start is None:
+                # Симметричная страховка: без точки отсчёта таймер не считаем.
+                self.time_drying_start = datetime.utcnow()
             delta = datetime.utcnow() - self.time_drying_start
             self.time_left_drying = self.current_preset.dry_time * 60 - delta.total_seconds()
             if delta.total_seconds() >= self.current_preset.dry_time * 60:
@@ -763,11 +825,13 @@ class Dryer_control(object):
                     await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
                     await self._servo_control()
                 else:
+                    # FIX: humidity_pid создаётся только в ветке TIMER_DRYING.
+                    # Если досушка прошла целиком «по температуре» (влажность
+                    # ни разу не опускалась в полосу), сюда приходили с None.
+                    if self.humidity_pid is None:
+                        self.humidity_pid = humidity_PID(self.current_preset.humidity, 1, max_temperature)
                     pid_result = await self.humidity_pid.get(self.temperature_and_humidity.median_relative_humidity)
                     if pid_result == 1:
-                        max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
-                        if max_temperature > self.heater.max_temperature:
-                            max_temperature = self.heater.max_temperature
                         await self.heater_pid.update(1, 1, max_temperature)
                         await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
                     else:
@@ -777,16 +841,35 @@ class Dryer_control(object):
                     else:
                         await self.servo.close()
             ##################################
+            # FIX: time_drying_start мог остаться None (влажность между
+            # target_max и target_max+0.1) -> вычитание из None роняло цикл.
+            if self.time_drying_start is None:
+                self.time_left_drying = None
+                return
             delta = datetime.utcnow() - self.time_drying_start
-            self.time_left_drying = self.current_preset.dry_time * 60 - delta.total_seconds()
+            # FIX: обратный отсчёт в режиме хранения считался по dry_time
+            # (180 мин у PLA) вместо humidity_storage_dry_time (10 мин),
+            # поэтому в интерфейсе показывалось заведомо неверное время,
+            # а затем уходило в минус.
+            self.time_left_drying = self.current_preset.humidity_storage_dry_time * 60 - delta.total_seconds()
             if delta.total_seconds() >= self.current_preset.humidity_storage_dry_time * 60:
                 await self.heater.set(target=0)
+                # FIX: цикл досушки мог закончиться с открытой крышкой —
+                # хранение с открытой камерой лишено смысла.
+                await self.servo.close()
                 self.time_drying_start = None
+                self.time_left_drying = None
         elif self.status == dryer_schema.DryerLogStatus.TEMPERATURE_STORAGE:
-            max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
-            if max_temperature > self.heater.max_temperature:
-                max_temperature = self.heater.max_temperature
-            await self.heater_pid.update(self.current_preset.temperature, self.current_preset.storage_temperature, max_temperature)
+            # FIX: уставкой было preset.temperature (температура СУШКИ, 90 °C
+            # у PA), а storage_temperature использовалась лишь как нижний
+            # предел выхода PID. То есть «хранение при 70 °C», обещанное в
+            # интерфейсе, на деле держало камеру на 90 °C бесконечно.
+            # Теперь уставка = storage_temperature, нижний предел = 1.
+            storage_target = self.current_preset.storage_temperature
+            if storage_target and storage_target > 0:
+                await self.heater_pid.update(storage_target, 1, max_temperature)
+            else:
+                await self.heater_pid.update(self.current_preset.temperature, 1, max_temperature)
             await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
             if self.temperature_and_humidity.median_relative_humidity > self.current_preset.humidity:
                 await self._servo_control()
@@ -817,6 +900,16 @@ class Dryer_control(object):
         humidity_values = self.temperature_and_humidity.relative_humidity_values
         required = humidity_cfg.plateau_duration
         if len(humidity_values) != required:
+            return
+
+        # FIX: не принимать новых решений, пока заслонка ещё едет.
+        # Ход 125->30 градусов при soft_step=3/soft_sleep=0.3 занимает ~16 с,
+        # а min_interval был 10 с: новая команда отменяла незавершённый ход
+        # (_soft_set_angle cancel'ит предыдущую задачу), и заслонка болталась
+        # между крайними положениями, ни разу их не достигая.
+        soft_task = self.servo._soft_task
+        if soft_task is not None and not soft_task.done():
+            logger.debug("Servo decision skipped: move in progress id=%s", self.id)
             return
 
         window = humidity_cfg.plateau_window_size

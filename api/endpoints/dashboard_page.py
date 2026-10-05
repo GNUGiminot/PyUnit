@@ -189,7 +189,10 @@ async def dryer_control_set_preset(dryer_id: int, preset_id: Optional[int] = Non
         )
     if preset_id is None:
         dryer_status = dryer_schema.DryerLogStatus.PENDING
-        await runtime_dryer.set_status(dryer_status)
+        # FIX: под локом — иначе смена статуса могла попасть в середину
+        # _apply_actuator_targets воркера и обнулить current_preset/PID,
+        # после чего цикл падал с "'NoneType' object has no attribute ...".
+        await runtime_dryer.set_status_external(dryer_status)
         return {"success": True, "message": f"Dryer with id {dryer_id} set to status {dryer_status}"}
     existing_preset_link = await preset_crud.get_preset_link(db, preset_id, dryer_id)
     if not existing_preset_link:
@@ -200,7 +203,7 @@ async def dryer_control_set_preset(dryer_id: int, preset_id: Optional[int] = Non
         )
     existing_preset = await preset_crud.get_preset(db, preset_id)
     dryer_status = dryer_schema.DryerLogStatus.DRYING
-    await runtime_dryer.set_status(dryer_status, existing_preset)
+    await runtime_dryer.set_status_external(dryer_status, existing_preset)
     return {"success": True, "message": f"Dryer with id {dryer_id} set to status {dryer_status} with preset {existing_preset.name}"}
 
 

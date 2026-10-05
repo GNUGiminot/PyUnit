@@ -33,6 +33,7 @@ class StatusWorker:
         self.task: asyncio.Task | None = None
         self.running = False
         self.app: FastAPI | None = None
+        self._consecutive_errors = 0
 
     async def worker(self):
         """Main loop fetching DB dryers, syncing instances, updating status, broadcasting logs."""
@@ -83,6 +84,9 @@ class StatusWorker:
                         except Exception as e:
                             logger.warning("Failed to parse/broadcast individual log: %s", e)
                             
+                # Цикл дошёл до конца без исключений — сбрасываем счётчик
+                # подряд идущих сбоев fail-safe.
+                self._consecutive_errors = 0
                 end_time = datetime.utcnow()
                 delta_time = end_time - start_time
                 # Aim for ~1 second loop time
@@ -110,14 +114,37 @@ class StatusWorker:
                 logger.info("Runtime dryer removed dryer_id=%s", id)
                 break
 
+    # Через столько подряд идущих сбоев цикла считаем связь потерянной и
+    # дополнительно открываем крышку, чтобы камера не оставалась горячей и
+    # герметичной. Одиночные таймауты Moonraker (они бывают штатно) крышку
+    # не трогают — иначе она дёргалась бы на каждой сетевой икоте.
+    FAILSAFE_OPEN_AFTER = 15
+
     async def _on_data_error(self):
-        """Fail-safe: stop heating on all dryers after unrecoverable loop error."""
+        """Fail-safe: stop heating on all dryers after unrecoverable loop error.
+
+        FIX: раньше heater.set(0) шёл через _ensure_initialized(), который при
+        недоступном Moonraker пытался прочитать max_temp, падал, и исключение
+        глоталось `except Exception: pass` — нагрев оставался включённым.
+        Теперь Heater_control.set(0) выполняется без предварительных запросов,
+        а сбои считаются, чтобы при устойчивой потере связи открыть крышку.
+        """
+        self._consecutive_errors = getattr(self, "_consecutive_errors", 0) + 1
         dryers: list[Dryer_control] = self.app.state.dryer_instances
         for dryer in dryers:
             try:
                 await dryer.heater.set(0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Fail-safe: heater off FAILED dryer_id=%s error=%s", dryer.id, e)
+            if self._consecutive_errors == self.FAILSAFE_OPEN_AFTER:
+                logger.error(
+                    "Fail-safe: %s consecutive loop errors -> opening lid dryer_id=%s",
+                    self._consecutive_errors, dryer.id
+                )
+                try:
+                    await dryer.servo.open(fast=True)
+                except Exception as e:
+                    logger.error("Fail-safe: lid open FAILED dryer_id=%s error=%s", dryer.id, e)
 
     async def start(self, app: FastAPI):
         """Start the background worker loop."""
