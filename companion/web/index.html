@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ru" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<title>Сушилка U1</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e8e6e1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181a" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ======================= ЭКРАН: СУШКА ======================= -->
+  <main class="screen" id="screen-run" data-screen="run">
+
+    <header class="bar">
+      <div class="bar__unit">
+        <span class="unit-name" id="unitName">—</span>
+        <span class="chip chip--material" id="material" hidden></span>
+      </div>
+      <div class="lamp" id="statusLamp" data-state="offline">
+        <i class="lamp__dot"></i><span class="lamp__text" id="statusText">нет связи</span>
+      </div>
+    </header>
+
+    <!-- Кольцевые шкалы -->
+    <section class="dials" aria-label="Показания датчиков">
+
+      <figure class="dial" id="dialTemp" data-metric="heat">
+        <svg class="dial__svg" viewBox="0 0 212 212" role="img" aria-labelledby="dialTempLbl">
+          <defs data-defs="temp"></defs>
+          <g class="dial__ticks" data-ticks="temp"></g>
+          <g class="dial__scale" data-scale="temp"></g>
+          <circle class="dial__track" cx="106" cy="106" r="78"></circle>
+          <circle class="dial__bloom" cx="106" cy="106" r="78"></circle>
+          <circle class="dial__arc" cx="106" cy="106" r="78"></circle>
+          <g class="dial__target" data-target="temp" hidden>
+            <path d="M106 13 L109 23 L103 23 Z"></path>
+          </g>
+          <circle class="dial__head" data-head="temp" cx="106" cy="184" r="5"></circle>
+        </svg>
+        <figcaption class="dial__face">
+          <output class="dial__value" id="tempValue">--.-</output>
+          <span class="dial__unit">°C</span>
+          <span class="dial__label" id="dialTempLbl">температура</span>
+        </figcaption>
+      </figure>
+
+      <figure class="dial" id="dialHum" data-metric="moist">
+        <svg class="dial__svg" viewBox="0 0 212 212" role="img" aria-labelledby="dialHumLbl">
+          <defs data-defs="hum"></defs>
+          <g class="dial__ticks" data-ticks="hum"></g>
+          <g class="dial__scale" data-scale="hum"></g>
+          <circle class="dial__track" cx="106" cy="106" r="78"></circle>
+          <circle class="dial__bloom" cx="106" cy="106" r="78"></circle>
+          <circle class="dial__arc" cx="106" cy="106" r="78"></circle>
+          <g class="dial__target" data-target="hum" hidden>
+            <path d="M106 13 L109 23 L103 23 Z"></path>
+          </g>
+          <circle class="dial__head" data-head="hum" cx="106" cy="184" r="5"></circle>
+        </svg>
+        <figcaption class="dial__face">
+          <output class="dial__value" id="humValue">--.-</output>
+          <span class="dial__unit">%</span>
+          <span class="dial__label" id="dialHumLbl">влажность</span>
+        </figcaption>
+      </figure>
+
+    </section>
+
+    <!-- Уставки -->
+    <dl class="setpoints">
+      <div class="setpoint"><dt>уставка</dt><dd id="spTemp">—</dd></div>
+      <div class="setpoint"><dt>цель</dt><dd id="spHum">—</dd></div>
+      <div class="setpoint"><dt>блок</dt><dd id="spHeater">—</dd></div>
+    </dl>
+
+    <!-- Ход сушки -->
+    <section class="progress" id="progress" hidden>
+      <div class="progress__head">
+        <span class="progress__phase" id="phaseText">выдержка</span>
+        <span class="progress__left" id="timeLeft">—</span>
+      </div>
+      <div class="progress__rail"><i class="progress__fill" id="progressFill"></i></div>
+      <div class="progress__meta">
+        <span id="elapsedText"></span>
+        <span id="etaText"></span>
+      </div>
+    </section>
+
+    <!-- Состояние исполнительных механизмов -->
+    <section class="lamps" aria-label="Состояние механизмов">
+      <div class="state" id="stHeater" data-on="false">
+        <i class="state__led"></i><span class="state__name">нагрев</span><span class="state__val" id="stHeaterVal">выкл</span>
+      </div>
+      <div class="state" id="stLid" data-on="false">
+        <i class="state__led"></i><span class="state__name">крышка</span><span class="state__val" id="stLidVal">закрыта</span>
+      </div>
+      <div class="state" id="stFan" data-on="false">
+        <i class="state__led"></i><span class="state__name">обдув</span><span class="state__val" id="stFanVal">выкл</span>
+      </div>
+    </section>
+
+    <!-- Самописец -->
+    <section class="trace">
+      <div class="trace__head">
+        <span class="trace__title">запись</span>
+        <div class="seg" role="group" aria-label="Интервал">
+          <button type="button" class="seg__btn" data-range="1800">30м</button>
+          <button type="button" class="seg__btn is-on" data-range="7200">2ч</button>
+          <button type="button" class="seg__btn" data-range="86400">24ч</button>
+        </div>
+      </div>
+      <canvas id="traceCanvas" class="trace__canvas" height="150"></canvas>
+      <div class="trace__legend">
+        <span class="key key--heat">температура</span>
+        <span class="key key--moist">влажность</span>
+      </div>
+    </section>
+
+    <!-- Управление -->
+    <section class="control">
+      <div class="presets" id="presets" role="group" aria-label="Пресеты"></div>
+      <div class="actions">
+        <button type="button" class="btn btn--go" id="btnStart" disabled>Запустить</button>
+        <button type="button" class="btn btn--stop" id="btnStop" disabled>Стоп</button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ======================= ЭКРАН: СЧЁТЧИК ======================= -->
+  <main class="screen" id="screen-stats" data-screen="stats" hidden>
+
+    <header class="bar">
+      <div class="bar__unit"><span class="unit-name">Счётчик сушек</span></div>
+      <div class="seg seg--sm" role="group" aria-label="Период">
+        <button type="button" class="seg__btn is-on" data-period="all">всё время</button>
+        <button type="button" class="seg__btn" data-period="365">год</button>
+        <button type="button" class="seg__btn" data-period="30">месяц</button>
+      </div>
+    </header>
+
+    <section class="totals">
+      <div class="total"><span class="total__num" id="totRuns">—</span><span class="total__cap">сушек</span></div>
+      <div class="total"><span class="total__num" id="totHours">—</span><span class="total__cap">часов в работе</span></div>
+      <div class="total"><span class="total__num" id="totHeat">—</span><span class="total__cap">часов нагрева</span></div>
+    </section>
+
+    <section class="bymat">
+      <h2 class="h">По материалам</h2>
+      <ul class="matlist" id="matList"></ul>
+    </section>
+
+    <section class="history">
+      <h2 class="h">Последние сушки</h2>
+      <ul class="sessions" id="sessionList"></ul>
+    </section>
+
+  </main>
+
+  <!-- ======================= ЭКРАН: ЕЩЁ ======================= -->
+  <main class="screen" id="screen-more" data-screen="more" hidden>
+
+    <header class="bar">
+      <div class="bar__unit"><span class="unit-name">Ещё</span></div>
+      <span class="more__hint" id="moreHost"></span>
+    </header>
+
+    <section class="more">
+      <p class="more__lead">Редактирование и настройка — в полном интерфейсе PyUnit. Откроется в этой же вкладке.</p>
+      <ul class="links">
+        <li><a class="link" data-path="presets" href="#">
+          <span class="link__name">Пресеты</span>
+          <span class="link__desc">создать, изменить температуру, время, хранение</span></a></li>
+        <li><a class="link" data-path="logs" href="#">
+          <span class="link__name">Журнал</span>
+          <span class="link__desc">события сушилки и приложения, поиск</span></a></li>
+        <li><a class="link" data-path="config" href="#">
+          <span class="link__name">Конфигурация</span>
+          <span class="link__desc">датчики, нагреватель, заслонка, пороги влажности</span></a></li>
+        <li><a class="link" data-path="dashboard/1" href="#">
+          <span class="link__name">Макросы Klipper</span>
+          <span class="link__desc">G-code и ссылки для встраивания в Mainsail</span></a></li>
+        <li><a class="link link--main" data-path="" href="#">
+          <span class="link__name">Полный интерфейс PyUnit</span>
+          <span class="link__desc">всё сразу, как в оригинале</span></a></li>
+      </ul>
+    </section>
+
+  </main>
+
+  <!-- Переключение экранов -->
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab is-on" data-goto="run" role="tab" aria-selected="true">Сушка</button>
+    <button type="button" class="tab" data-goto="stats" role="tab" aria-selected="false">Счётчик</button>
+    <button type="button" class="tab" data-goto="more" role="tab" aria-selected="false">Ещё</button>
+    <button type="button" class="tab tab--theme" id="themeBtn" title="Тема оформления">◐</button>
+  </nav>
+
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

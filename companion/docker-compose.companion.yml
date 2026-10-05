@@ -1,0 +1,48 @@
+# Компаньон сушилки — ОТДЕЛЬНЫЙ compose-проект.
+# Намеренно не трогает docker-compose.yml самого PyUnit: на этом хосте
+# docker-compose 1.29.2 несовместим с Docker Engine 28 и падает с
+# KeyError: 'ContainerConfig' при пересоздании существующего контейнера.
+#
+# Запуск:  cd <каталог-PyUnit>/companion && docker-compose -p dryer-companion -f docker-compose.companion.yml up -d --build
+# Откат:   docker-compose -p dryer-companion -f docker-compose.companion.yml down
+#
+# PyUnit на :5000 продолжает работать как ни в чём не бывало и остаётся
+# запасным входом.
+#
+# Каталог companion/ должен лежать внутри каталога PyUnit (рядом с pyunit.db):
+# пути к базе заданы относительно него.
+version: '3.3'
+
+services:
+  dryer-ui:
+    image: nginx:alpine
+    container_name: dryer-ui
+    ports:
+      - "5001:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./web:/srv/web:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/upgrade.conf:/etc/nginx/conf.d/00-upgrade.conf:ro
+    restart: unless-stopped
+
+  dryer-stats:
+    build: ./stats
+    container_name: dryer-stats
+    environment:
+      - DB_PATH=/data/pyunit.db
+      - OWN_DB=/state/stats.db
+    volumes:
+      # База PyUnit — те же три файла, что монтирует сам PyUnit. Сервис
+      # открывает её через URI mode=ro и ничего в неё не пишет; каталог
+      # rw лишь потому, что SQLite в режиме WAL требует доступ к -shm.
+      - ../pyunit.db:/data/pyunit.db
+      - ../pyunit.db-wal:/data/pyunit.db-wal
+      - ../pyunit.db-shm:/data/pyunit.db-shm
+      # Собственная база сессий — переживает очистку телеметрии в PyUnit.
+      - stats_state:/state
+    restart: unless-stopped
+
+volumes:
+  stats_state:

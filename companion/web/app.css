@@ -1,0 +1,398 @@
+/* ==========================================================================
+   Сушилка PyUnit — оформление «Камера»
+   Тёмная машинная панель. Цвет кольца не декоративный: он вычисляется из
+   самого значения — холодная камера светится синим, прогретая уходит в
+   янтарь и красное; сухой воздух бирюзовый, сырой — густо-синий.
+   Свечение появляется только когда нагрев реально включён.
+   ========================================================================== */
+
+/* --- Токены: тёмная тема (основная) ------------------------------------- */
+:root {
+  --ground:    #080a0e;
+  --ground-2:  #10141c;   /* подсветка вверху страницы */
+  --panel:     #11151c;
+  --panel-2:   #171c25;
+  --groove:    #0a0d12;   /* утопленный паз под кольцом */
+  --ink:       #eef2f8;
+  --ink-dim:   #96a2b3;
+  --ink-mute:  #5c6878;
+  --rule:      #1d2430;
+  --rule-2:    #28313f;
+  --tick:      #2b3442;
+  --tick-major:#556375;
+  --sheen:     rgba(255, 255, 255, .055);
+
+  --accent:    #4fd6ff;
+  --ok:        #3ddc84;
+  --danger:    #ff5c5c;
+  --idle:      #46505f;
+
+  --r:         14px;
+  --r-sm:      9px;
+  --shadow:    0 1px 0 var(--sheen) inset, 0 18px 40px -28px #000;
+  --inset:     inset 0 2px 4px rgba(0, 0, 0, .55);
+
+  --face:      system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --read:      ui-monospace, 'Roboto Mono', 'DejaVu Sans Mono', 'Courier New', monospace;
+}
+
+/* --- Токены: светлая тема (яркий цех днём) ------------------------------ */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --ground:    #eef1f5;
+    --ground-2:  #ffffff;
+    --panel:     #ffffff;
+    --panel-2:   #f3f5f9;
+    --groove:    #e3e7ee;
+    --ink:       #10151c;
+    --ink-dim:   #566376;
+    --ink-mute:  #8b97a8;
+    --rule:      #dde2ea;
+    --rule-2:    #c9d1dd;
+    --tick:      #c3cbd8;
+    --tick-major:#7d8899;
+    --sheen:     rgba(16, 21, 28, .04);
+    --accent:    #0d7fb0;
+    --ok:        #1f9d57;
+    --idle:      #aab3c0;
+    --shadow:    0 1px 2px rgba(16, 21, 28, .06), 0 14px 30px -24px rgba(16, 21, 28, .5);
+    --inset:     inset 0 1px 3px rgba(16, 21, 28, .09);
+  }
+}
+:root[data-theme='light'] {
+  --ground:    #eef1f5;
+  --ground-2:  #ffffff;
+  --panel:     #ffffff;
+  --panel-2:   #f3f5f9;
+  --groove:    #e3e7ee;
+  --ink:       #10151c;
+  --ink-dim:   #566376;
+  --ink-mute:  #8b97a8;
+  --rule:      #dde2ea;
+  --rule-2:    #c9d1dd;
+  --tick:      #c3cbd8;
+  --tick-major:#7d8899;
+  --sheen:     rgba(16, 21, 28, .04);
+  --accent:    #0d7fb0;
+  --ok:        #1f9d57;
+  --idle:      #aab3c0;
+  --shadow:    0 1px 2px rgba(16, 21, 28, .06), 0 14px 30px -24px rgba(16, 21, 28, .5);
+  --inset:     inset 0 1px 3px rgba(16, 21, 28, .09);
+}
+
+/* --- Основа ------------------------------------------------------------- */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  background-image: radial-gradient(120% 55% at 50% -12%, var(--ground-2) 0%, transparent 62%);
+  background-attachment: fixed;
+  color: var(--ink);
+  font-family: var(--face);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.shell {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 14px 13px calc(78px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; gap: 11px;
+}
+.screen { display: flex; flex-direction: column; gap: 11px; }
+.screen[hidden] { display: none; }
+
+.bar, .dials, .setpoints, .progress, .lamps, .trace, .control,
+.totals, .bymat, .history {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  box-shadow: var(--shadow);
+}
+
+/* --- Шапка -------------------------------------------------------------- */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 14px; }
+.bar__unit { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.unit-name { font-size: .92rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+.chip {
+  font: 700 .66rem/1 var(--face); letter-spacing: .12em; text-transform: uppercase;
+  padding: .36rem .55rem; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--rule-2); color: var(--ink-dim);
+}
+.chip[hidden] { display: none; }
+
+.lamp { display: inline-flex; align-items: center; gap: .5rem; }
+.lamp__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+.lamp__text { font-size: .64rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-dim); }
+.lamp[data-state='run'] .lamp__dot {
+  background: var(--heat-now, #ff8a3d);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--heat-now, #ff8a3d) 22%, transparent);
+  animation: pulse 2.2s ease-in-out infinite;
+}
+.lamp[data-state='run'] .lamp__text { color: var(--heat-now, #ff8a3d); }
+.lamp[data-state='store'] .lamp__dot { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent); }
+.lamp[data-state='store'] .lamp__text { color: var(--ok); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* --- Кольца ------------------------------------------------------------- */
+.dials {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+  padding: 20px 8px 16px;
+}
+.dial { position: relative; margin: 0; display: grid; place-items: center; }
+.dial__svg { width: 100%; max-width: 200px; height: auto; display: block; overflow: visible; }
+
+.dial__track, .dial__arc, .dial__bloom {
+  fill: none;
+  transform: rotate(135deg); transform-origin: 106px 106px;
+}
+.dial__track { stroke: var(--groove); stroke-width: 13; stroke-linecap: round; }
+
+/* Ореол — не размытие, а вторая дуга пошире малой непрозрачности:
+   чёткая на любом экране и ничего не стоит по отрисовке */
+.dial__bloom {
+  stroke: var(--arc, var(--accent)); stroke-width: 24; stroke-linecap: round;
+  opacity: .11;
+  transition: stroke-dasharray .7s cubic-bezier(.22, .61, .36, 1), opacity .9s ease;
+}
+.dial.is-heating .dial__bloom { opacity: .2; }
+
+.dial__arc {
+  stroke: var(--arc, var(--accent)); stroke-width: 13; stroke-linecap: round;
+  transition: stroke-dasharray .7s cubic-bezier(.22, .61, .36, 1), stroke .7s linear;
+}
+
+.dial__head {
+  fill: var(--panel); stroke: var(--arc, var(--accent)); stroke-width: 3;
+  transition: cx .7s cubic-bezier(.22, .61, .36, 1), cy .7s cubic-bezier(.22, .61, .36, 1);
+}
+
+.dial__ticks line { stroke: var(--tick); stroke-width: 1.3; }
+.dial__ticks line.major { stroke: var(--tick-major); stroke-width: 2.2; }
+
+/* Оцифровка шкалы */
+.dial__scale text {
+  fill: var(--ink-mute);
+  font-family: var(--read); font-size: 11px; font-weight: 600;
+  text-anchor: middle; dominant-baseline: central;
+}
+
+/* Метка уставки — стрелка, направленная внутрь кольца */
+.dial__target path { fill: var(--ink); }
+.dial__target { transition: transform .7s cubic-bezier(.22, .61, .36, 1); }
+.dial__target[hidden] { display: none; }
+
+.dial__face { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; pointer-events: none; gap: 1px; }
+.dial__value {
+  font-family: var(--read); font-variant-numeric: tabular-nums;
+  font-size: clamp(1.65rem, 9.5vw, 2.35rem); font-weight: 700;
+  letter-spacing: -.055em; line-height: 1; color: var(--ink);
+}
+.dial__unit { font-family: var(--read); font-size: .76rem; color: var(--ink-mute); line-height: 1; }
+.dial__label { margin-top: .5rem; font-size: .54rem; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; color: var(--ink-mute); }
+
+/* --- Уставки ------------------------------------------------------------ */
+.setpoints { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; padding: 0; }
+.setpoint { padding: 10px 10px; text-align: center; }
+.setpoint + .setpoint { border-left: 1px solid var(--rule); }
+.setpoint dt { font-size: .54rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-mute); }
+.setpoint dd { margin: .3rem 0 0; font-family: var(--read); font-variant-numeric: tabular-nums; font-size: .95rem; font-weight: 700; color: var(--ink); }
+
+/* --- Ход сушки ---------------------------------------------------------- */
+.progress { padding: 12px 14px 14px; }
+.progress[hidden] { display: none; }
+.progress__head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.progress__phase { font-size: .58rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-mute); }
+.progress__left { font-family: var(--read); font-variant-numeric: tabular-nums; font-size: 1.1rem; font-weight: 700; letter-spacing: -.03em; }
+.progress__rail { margin-top: 9px; height: 5px; border-radius: 3px; background: var(--groove); box-shadow: var(--inset); overflow: hidden; }
+.progress__meta {
+  display: flex; justify-content: space-between; gap: 10px; margin-top: 8px;
+  font-family: var(--read); font-variant-numeric: tabular-nums;
+  font-size: .68rem; color: var(--ink-mute);
+}
+.progress__fill {
+  display: block; height: 100%; width: 0; border-radius: 3px;
+  background: var(--heat-now, #ff8a3d);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--heat-now, #ff8a3d) 45%, transparent), var(--heat-now, #ff8a3d));
+  transition: width .9s cubic-bezier(.22, .61, .36, 1);
+}
+
+/* --- Лампы механизмов --------------------------------------------------- */
+.lamps { display: grid; grid-template-columns: repeat(3, 1fr); }
+.state { padding: 11px 8px; text-align: center; display: grid; gap: 5px; justify-items: center; }
+.state + .state { border-left: 1px solid var(--rule); }
+.state__led { width: 10px; height: 10px; border-radius: 50%; background: var(--groove); box-shadow: var(--inset); }
+.state__name { font-size: .53rem; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; color: var(--ink-mute); }
+.state__val { font-size: .7rem; font-weight: 700; color: var(--ink-dim); }
+#stHeater[data-on='true'] .state__led { background: var(--heat-now, #ff8a3d); box-shadow: 0 0 0 3px color-mix(in srgb, var(--heat-now, #ff8a3d) 20%, transparent); }
+#stHeater[data-on='true'] .state__val { color: var(--heat-now, #ff8a3d); }
+#stLid[data-on='true']    .state__led { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+#stLid[data-on='true']    .state__val { color: var(--accent); }
+#stFan[data-on='true']    .state__led { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+#stFan[data-on='true']    .state__val { color: var(--ok); }
+
+/* --- Самописец ---------------------------------------------------------- */
+.trace { padding: 12px 12px 13px; }
+.trace__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.trace__title { font-size: .56rem; font-weight: 800; letter-spacing: .17em; text-transform: uppercase; color: var(--ink-mute); }
+.trace__canvas { width: 100%; height: 152px; display: block; }
+.trace__legend { display: flex; gap: 14px; margin-top: 8px; }
+.key { font-size: .61rem; color: var(--ink-dim); display: inline-flex; align-items: center; gap: .4rem; }
+.key::before { content: ''; width: 14px; height: 2px; border-radius: 1px; }
+.key--heat::before  { background: var(--heat-now, #ff8a3d); }
+.key--moist::before { background: var(--moist-now, #3bb8e8); }
+
+.seg { display: inline-flex; gap: 2px; padding: 3px; background: var(--groove); border: 1px solid var(--rule); border-radius: 999px; }
+.seg__btn {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--ink-mute); font: 700 .66rem/1 var(--face); padding: .36rem .62rem; border-radius: 999px;
+  transition: color .15s, background .15s;
+}
+.seg__btn.is-on { background: var(--panel-2); color: var(--ink); box-shadow: 0 1px 0 var(--sheen) inset; }
+.seg__btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.seg--sm .seg__btn { font-size: .6rem; padding: .32rem .5rem; }
+
+/* --- Управление --------------------------------------------------------- */
+.control { padding: 12px; display: grid; gap: 11px; }
+.presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(74px, 1fr)); gap: 6px; }
+.preset {
+  appearance: none; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--rule-2); border-radius: var(--r-sm);
+  color: var(--ink-dim); font: 800 .76rem/1 var(--face); letter-spacing: .06em;
+  padding: .68rem .3rem; text-align: center;
+  transition: background .15s, color .15s, border-color .15s, box-shadow .15s;
+}
+.preset:hover { color: var(--ink); border-color: var(--ink-mute); }
+.preset.is-on {
+  background: var(--panel-2);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-2));
+  border-color: var(--accent); color: var(--ink);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btn {
+  appearance: none; cursor: pointer; border-radius: var(--r-sm); border: 1px solid transparent;
+  font: 800 .8rem/1 var(--face); letter-spacing: .08em; text-transform: uppercase; padding: .85rem 1rem;
+  transition: filter .15s, background .15s;
+}
+.btn:disabled { opacity: .35; cursor: not-allowed; }
+.btn--go { background: linear-gradient(180deg, #ff9d4d, #ef6a22); color: #1a0d04; }
+.btn--stop { background: var(--panel-2); color: var(--ink); border-color: var(--rule-2); }
+.btn:not(:disabled):hover { filter: brightness(1.1); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --- Счётчик ------------------------------------------------------------ */
+.totals { display: grid; grid-template-columns: repeat(3, 1fr); }
+.total { padding: 16px 8px; text-align: center; }
+.total + .total { border-left: 1px solid var(--rule); }
+.total__num {
+  display: block; font-family: var(--read); font-variant-numeric: tabular-nums;
+  font-size: clamp(1.35rem, 7.5vw, 1.9rem); font-weight: 700; letter-spacing: -.045em;
+}
+.total__cap { display: block; margin-top: .35rem; font-size: .53rem; font-weight: 800; letter-spacing: .15em; text-transform: uppercase; color: var(--ink-mute); }
+
+.bymat, .history { padding: 13px 14px 15px; }
+.h { margin: 0 0 11px; font-size: .56rem; font-weight: 800; letter-spacing: .17em; text-transform: uppercase; color: var(--ink-mute); }
+.matlist, .sessions { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+
+.mat { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; }
+.mat__name { font-weight: 800; font-size: .84rem; letter-spacing: .03em; }
+.mat__num { font-family: var(--read); font-variant-numeric: tabular-nums; font-size: .78rem; color: var(--ink-dim); }
+.mat__bar { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--groove); box-shadow: var(--inset); overflow: hidden; }
+.mat__fill { display: block; height: 100%; border-radius: 2px; background: var(--accent); background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 40%, transparent), var(--accent)); }
+
+.sess { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: baseline; font-size: .78rem; }
+.sess__date { font-family: var(--read); color: var(--ink-mute); font-size: .69rem; }
+.sess__mat { font-weight: 700; }
+.sess__dur { font-family: var(--read); font-variant-numeric: tabular-nums; color: var(--ink-dim); }
+.sess[data-outcome='aborted'] .sess__mat { color: var(--ink-mute); font-weight: 600; }
+.sess[data-outcome='aborted'] .sess__mat::after { content: ' · прервана'; font-size: .65rem; font-weight: 500; }
+
+.empty { color: var(--ink-mute); font-size: .8rem; }
+
+/* --- Раздел «Ещё» ------------------------------------------------------- */
+.more { padding: 14px; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); box-shadow: var(--shadow); }
+.more__lead { margin: 0 0 12px; font-size: .8rem; line-height: 1.5; color: var(--ink-dim); max-width: 52ch; }
+.more__hint { font-family: var(--read); font-size: .66rem; color: var(--ink-mute); }
+.links { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.link {
+  display: grid; gap: 3px; padding: 13px 14px; text-decoration: none;
+  background: var(--panel-2); border: 1px solid var(--rule-2); border-radius: var(--r-sm);
+  color: var(--ink); position: relative;
+  transition: border-color .15s, background .15s;
+}
+.link::after { content: '97'; position: absolute; right: 14px; top: 50%; transform: translateY(-50%); color: var(--ink-mute); font-size: 1.05rem; }
+.link:hover { border-color: var(--accent); }
+.link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.link__name { font-weight: 800; font-size: .86rem; letter-spacing: .02em; padding-right: 28px; }
+.link__desc { font-size: .72rem; color: var(--ink-mute); padding-right: 28px; }
+.link--main { border-color: var(--accent); }
+@media (min-width: 900px) { .links { grid-template-columns: 1fr 1fr; } .link--main { grid-column: 1 / -1; } }
+
+/* --- Нижняя навигация --------------------------------------------------- */
+.tabs {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  display: flex; gap: 4px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border-top: 1px solid var(--rule);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}
+.tab {
+  appearance: none; border: 0; cursor: pointer; flex: 1;
+  background: transparent; color: var(--ink-mute);
+  font: 800 .7rem/1 var(--face); letter-spacing: .12em; text-transform: uppercase;
+  padding: .72rem .4rem; border-radius: var(--r-sm);
+  transition: background .15s, color .15s;
+}
+.tab.is-on { background: var(--panel-2); color: var(--ink); box-shadow: 0 1px 0 var(--sheen) inset; }
+.tab--theme { flex: 0 0 48px; font-size: 1rem; letter-spacing: 0; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* --- Уведомление -------------------------------------------------------- */
+.toast {
+  position: fixed; left: 50%; bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  background: var(--panel-2); color: var(--ink);
+  border: 1px solid var(--rule-2);
+  padding: .65rem 1.05rem; border-radius: 999px; font-size: .76rem; font-weight: 700;
+  z-index: 60; max-width: 90vw; text-align: center; box-shadow: var(--shadow);
+}
+.toast[hidden] { display: none; }
+
+/* --- Широкий экран ------------------------------------------------------ */
+@media (min-width: 900px) {
+  .shell { max-width: 1080px; padding-bottom: 94px; }
+  #screen-run {
+    display: grid; align-items: start;
+    grid-template-columns: minmax(350px, 430px) 1fr;
+    grid-template-areas:
+      'bar   bar'
+      'dials trace'
+      'sets  trace'
+      'prog  control'
+      'lamps control';
+    gap: 11px;
+  }
+  #screen-run > .bar       { grid-area: bar; }
+  #screen-run > .dials     { grid-area: dials; }
+  #screen-run > .setpoints { grid-area: sets; }
+  #screen-run > .progress  { grid-area: prog; }
+  #screen-run > .lamps     { grid-area: lamps; }
+  #screen-run > .trace     { grid-area: trace; }
+  #screen-run > .control   { grid-area: control; }
+  .trace__canvas { height: 268px; }
+  .tabs { justify-content: center; }
+  .tab { flex: 0 0 150px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
