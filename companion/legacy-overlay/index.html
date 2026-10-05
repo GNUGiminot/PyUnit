@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <title>PyUnit</title>
+  <base href="/">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/x-icon" href="./assets/imgs/logoWeb.svg">
+  <!-- Runtime Configuration -->
+  <script src="./assets/config.js"></script>
+<link rel="stylesheet" href="styles-SBLEVL4T.css"><link rel="stylesheet" href="pu-overlay.css"></head>
+<body>
+  <app-root></app-root>
+
+  <!-- Возврат в новый интерфейс (:5001). Стоит вне <app-root>, поэтому Angular
+       его не трогает. На страницах для встраивания в Klipper скрыт. -->
+  <a id="pu-back" hidden>&larr; Новый интерфейс</a>
+  <style>
+    #pu-back {
+      position: fixed; right: 14px; bottom: 14px; z-index: 2000;
+      padding: .62rem 1rem; border-radius: 999px;
+      background: #11151c; color: #eef2f8; text-decoration: none;
+      border: 1px solid #4fd6ff;
+      font: 700 .78rem/1 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      letter-spacing: .04em; box-shadow: 0 10px 24px -12px #000;
+    }
+    #pu-back:hover { background: #171c25; }
+    #pu-back:focus-visible { outline: 2px solid #4fd6ff; outline-offset: 2px; }
+    #pu-back[hidden] { display: none; }
+  </style>
+  <script>
+    (function () {
+      if (location.pathname.indexOf('/embed') === 0) return;
+      var a = document.getElementById('pu-back');
+      a.href = location.protocol + '//' + location.hostname + ':5001/';
+      a.hidden = false;
+    })();
+  </script>
+<link rel="modulepreload" href="chunk-FDERIQAA.js"><script src="polyfills-5CFQRCPP.js" type="module"></script><script src="scripts-7SWBP3MU.js" defer></script><script src="main-BH2RIMAZ.js" type="module"></script></body>
+</html>

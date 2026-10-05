@@ -1,0 +1,484 @@
+/* ==========================================================================
+   PyUnit UI overlay — «AURORA» (v3)
+   Мягкое стекло и цветовое кодирование: тепло — янтарь, влага — бирюза.
+   v3: пресеты — ровная сетка во всю ширину над статусом, карточки компактнее,
+       статус-карточка в две строки с кнопками справа, график ниже.
+
+   ТОЛЬКО CSS. Ни одного изменения в DOM, JS или API.
+   ========================================================================== */
+
+/* --- 1. Токены ---------------------------------------------------------- */
+:root,
+html[data-bs-theme='dark'] {
+  --pu-bg:          #0b0f16;
+  --pu-glass:       rgba(24, 32, 44, .72);
+  --pu-glass-2:     rgba(30, 40, 54, .78);
+  --pu-line:        rgba(255, 255, 255, .09);
+  --pu-line-2:      rgba(255, 255, 255, .14);
+  --pu-text:        #eef3f8;
+  --pu-text-dim:    #a3b1c2;
+  --pu-text-mute:   #71808f;
+
+  --pu-heat:        #ffb454;
+  --pu-hum:         #4fd1c5;
+  --pu-ok:          #4ade80;
+  --pu-accent:      #7dd3fc;
+
+  --pu-r:           14px;
+  --pu-r-sm:        9px;
+  --pu-mono:        ui-monospace, 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, monospace;
+  --pu-sans:        system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  --bs-body-bg:        var(--pu-bg);
+  --bs-body-color:     var(--pu-text);
+  --bs-emphasis-color: #ffffff;
+  --bs-secondary-color: var(--pu-text-dim);
+  --bs-border-color:   var(--pu-line);
+  --bs-card-bg:        var(--pu-glass);
+  --bs-card-border-color: var(--pu-line);
+  --bs-body-font-family: var(--pu-sans);
+  --bs-link-color:     var(--pu-accent);
+  --bs-primary:        #2f7ea8;
+  --bs-primary-rgb:    47, 126, 168;
+  --bs-focus-ring-color: rgba(125, 211, 252, .3);
+}
+
+/* --- 2. Фон ------------------------------------------------------------- */
+body {
+  background-color: var(--pu-bg) !important;
+  background-image:
+    radial-gradient(1200px 620px at 8% -10%,  rgba(79, 209, 197, .15) 0%, transparent 58%),
+    radial-gradient(1000px 560px at 92% 4%,   rgba(255, 138, 61, .11) 0%, transparent 55%),
+    radial-gradient(900px 700px at 50% 110%,  rgba(56, 189, 248, .09) 0%, transparent 60%);
+  background-attachment: fixed;
+  color: var(--pu-text) !important;
+  font-family: var(--pu-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Встраиваемые в Klipper страницы — без декора и без полей */
+body:has(app-dryer-chart-embed, app-dryer-control-embed) { background-image: none !important; }
+body:has(app-dryer-chart-embed, app-dryer-control-embed) .container {
+  margin-top: 0 !important; max-width: 100% !important; padding: 0 !important;
+}
+
+.container { max-width: min(1560px, 95vw) !important; }
+.text-muted { color: var(--pu-text-mute) !important; }
+
+/* --- 3. Шапка ----------------------------------------------------------- */
+.header.card, .header .card { background: transparent !important; border: 0 !important; box-shadow: none !important; }
+.header > .card {
+  background: var(--pu-glass) !important;
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--pu-line) !important;
+  border-radius: var(--pu-r) !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .07) inset, 0 20px 45px -32px #000 !important;
+}
+.header .card-body { padding: .6rem .9rem !important; }
+.header .fs-4.fw-bold {
+  font-size: 1.05rem !important; font-weight: 700 !important; letter-spacing: .02em;
+  background: linear-gradient(92deg, var(--pu-hum), var(--pu-accent) 55%, var(--pu-heat));
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent !important;
+}
+.header img { width: 30px !important; height: 24px !important; }
+
+/* Навигация — сегментированный контрол */
+.header .d-flex.flex-wrap.align-items-center:has(> .btn) {
+  background: rgba(10, 14, 20, .55);
+  border: 1px solid var(--pu-line);
+  border-radius: 999px;
+  padding: .24rem;
+  gap: .15rem;
+}
+.header .btn[class*='btn-outline-'] {
+  --bs-btn-color: var(--pu-text-dim);
+  --bs-btn-bg: transparent;
+  --bs-btn-border-color: transparent;
+  --bs-btn-hover-color: var(--pu-text);
+  --bs-btn-hover-bg: rgba(255, 255, 255, .06);
+  --bs-btn-hover-border-color: transparent;
+  --bs-btn-active-color: #fff;
+  --bs-btn-active-bg: rgba(255, 255, 255, .08);
+  --bs-btn-active-border-color: transparent;
+  border-radius: 999px !important;
+  padding: .38rem .9rem !important;
+  margin: 0 !important;
+  font-size: .8rem !important; font-weight: 600;
+}
+.header .btn[class*='btn-outline-'].active {
+  background: linear-gradient(135deg, rgba(79, 209, 197, .26), rgba(56, 189, 248, .18)) !important;
+  color: #fff !important;
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, .4);
+}
+.header .btn[class*='btn-outline-info'] {
+  border-radius: 999px !important; padding: .38rem .9rem !important;
+  font-size: .8rem !important; border: 1px solid var(--pu-line) !important;
+}
+
+/* --- 4. Стеклянные карточки --------------------------------------------- */
+.card, .dryer-detail-page .card {
+  background: var(--pu-glass) !important;
+  backdrop-filter: blur(12px) saturate(1.15);
+  -webkit-backdrop-filter: blur(12px) saturate(1.15);
+  border: 1px solid var(--pu-line) !important;
+  border-radius: var(--pu-r) !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .06) inset, 0 24px 50px -38px #000 !important;
+}
+/* График — без блюра: тяжело и незачем */
+.chart-card, .card:has(.chart-container) {
+  backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
+  background: rgba(18, 24, 33, .85) !important;
+}
+.card-header {
+  background: transparent !important;
+  border-bottom: 1px solid var(--pu-line) !important;
+  padding: .7rem 1rem !important;
+}
+.card-title, .card-header h2, .card-header h5 {
+  font-size: .88rem !important; font-weight: 600 !important; letter-spacing: .02em;
+  color: var(--pu-text) !important;
+}
+.card-header .bi { color: var(--pu-hum) !important; }
+
+/* --- 5. Плитки сушилок (дашборд) ---------------------------------------- */
+.dryer-grid { gap: .85rem !important; padding: .9rem !important; }
+.dryer-grid.grid-2, .dryer-grid.grid-3 {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)) !important;
+}
+.dryer-card {
+  /* подсветка живёт в самом background — не перекрывает текст */
+  background:
+    radial-gradient(420px 260px at 6% -20%, rgba(79, 209, 197, .15), transparent 70%),
+    linear-gradient(155deg, rgba(45, 60, 80, .52), rgba(20, 27, 37, .74)) !important;
+  border: 1px solid var(--pu-line-2) !important;
+  border-radius: var(--pu-r) !important;
+  padding: .9rem 1rem !important;
+  gap: .75rem !important;
+  overflow: hidden;
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+.dryer-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(125, 211, 252, .28) !important;
+  box-shadow: 0 22px 44px -30px rgba(0, 0, 0, .9) !important;
+}
+.dryer-name { font-size: 1rem !important; font-weight: 700 !important; color: #fff !important; }
+
+.dryer-card .badge.bg-info, .status-card .badge.bg-info {
+  background: linear-gradient(135deg, rgba(79, 209, 197, .25), rgba(56, 189, 248, .2)) !important;
+  color: #bff3ee !important;
+  border: 1px solid rgba(79, 209, 197, .35);
+  border-radius: 999px !important;
+  font-size: .62rem !important; font-weight: 600; letter-spacing: .08em;
+  padding: .26rem .58rem !important; text-transform: uppercase;
+}
+
+.dryer-status-inline {
+  display: inline-flex !important; align-items: center; gap: .4rem;
+  font-size: .62rem !important; letter-spacing: .1em !important;
+  padding: .3rem .6rem !important; border-radius: 999px !important;
+}
+.dryer-status-inline::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.status-active {
+  background: rgba(74, 222, 128, .14) !important; color: var(--pu-ok) !important;
+  box-shadow: inset 0 0 0 1px rgba(74, 222, 128, .35);
+}
+.status-active::before { animation: puGlow 1.9s ease-in-out infinite; }
+.status-pending {
+  background: rgba(160, 174, 192, .12) !important; color: var(--pu-text-mute) !important;
+  box-shadow: inset 0 0 0 1px rgba(160, 174, 192, .22);
+}
+@keyframes puGlow { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* --- 6. Метрики --------------------------------------------------------- */
+.dryer-data.two-rows { gap: .6rem !important; }
+.dryer-data .row-top { gap: 1.5rem !important; }
+.dryer-data .row-bottom { gap: .45rem !important; }
+.row-top .data-item { flex: 0 0 auto !important; position: relative; padding-bottom: .95rem; }
+
+.row-top .data-value {
+  font-family: var(--pu-mono); font-variant-numeric: tabular-nums;
+  font-size: 1.55rem !important; font-weight: 500 !important;
+  line-height: 1; letter-spacing: -.03em;
+  display: flex; align-items: center; gap: .4rem;
+}
+.row-top .data-value .bi {
+  font-size: .8rem; margin-right: 0 !important;
+  width: 1.5rem; height: 1.5rem; display: inline-flex;
+  align-items: center; justify-content: center; border-radius: 50%;
+}
+.temp-value { color: var(--pu-heat) !important; }
+.temp-value .bi { background: rgba(255, 180, 84, .14); box-shadow: 0 0 0 1px rgba(255, 180, 84, .25); }
+.humidity-value { color: var(--pu-hum) !important; }
+.humidity-value .bi { background: rgba(79, 209, 197, .14); box-shadow: 0 0 0 1px rgba(79, 209, 197, .25); }
+.time-left-value { color: var(--pu-accent) !important; font-size: 1.25rem !important; }
+.time-left-value .bi { background: rgba(125, 211, 252, .12); box-shadow: 0 0 0 1px rgba(125, 211, 252, .22); font-size: .72rem; }
+
+.row-top .data-item::after {
+  position: absolute; left: 0; bottom: 0;
+  font-family: var(--pu-sans); font-size: .55rem; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--pu-text-mute); font-weight: 600;
+}
+.row-top .data-item:has(.temp-value)::after      { content: 'Температура'; }
+.row-top .data-item:has(.humidity-value)::after  { content: 'Влажность'; }
+.row-top .data-item:has(.time-left-value)::after { content: 'До конца'; }
+
+.row-bottom .data-item { flex: 0 0 auto !important; }
+.row-bottom .data-value {
+  font-size: .64rem !important; font-weight: 700 !important;
+  letter-spacing: .09em; text-transform: uppercase;
+  padding: .32rem .62rem; border-radius: 999px;
+  background: rgba(255, 255, 255, .05);
+  box-shadow: inset 0 0 0 1px var(--pu-line);
+  color: var(--pu-text-mute) !important;
+}
+.row-bottom .data-value.text-danger {
+  color: #ffd9a8 !important;
+  background: linear-gradient(135deg, rgba(255, 138, 61, .3), rgba(255, 180, 84, .16));
+  box-shadow: inset 0 0 0 1px rgba(255, 138, 61, .4);
+}
+.row-bottom .data-value.text-primary {
+  color: #cdeeff !important;
+  background: linear-gradient(135deg, rgba(56, 189, 248, .28), rgba(125, 211, 252, .14));
+  box-shadow: inset 0 0 0 1px rgba(56, 189, 248, .38);
+}
+
+/* --- 7. Кнопки ---------------------------------------------------------- */
+.dryer-card .controls, .status-card .controls { gap: .5rem !important; }
+.dryer-card .controls .btn, .status-card .controls .btn {
+  flex: 0 1 150px; min-width: 96px;
+  font-size: .76rem !important; font-weight: 600;
+  letter-spacing: .04em; padding: .52rem .8rem !important;
+  border-radius: 999px !important; border: 0 !important;
+  transition: filter .18s ease, transform .12s ease;
+}
+.btn-primary { background: linear-gradient(135deg, #2b9fb8, #3b82f6) !important; color: #fff !important; }
+.btn-primary:hover:not(:disabled) { filter: brightness(1.12); }
+.btn-primary:disabled { background: rgba(255, 255, 255, .07) !important; color: var(--pu-text-mute) !important; }
+.btn-danger { background: linear-gradient(135deg, #b4443f, #e0645a) !important; color: #fff !important; }
+.btn-danger:hover:not(:disabled) { filter: brightness(1.12); }
+.btn-danger:disabled { background: rgba(255, 255, 255, .07) !important; color: var(--pu-text-mute) !important; }
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible { box-shadow: 0 0 0 3px var(--bs-focus-ring-color) !important; outline: 0; }
+
+.btn-group { background: rgba(10, 14, 20, .5); border-radius: 999px; padding: .2rem; gap: .12rem; }
+.btn-group .btn-outline-secondary {
+  --bs-btn-color: var(--pu-text-dim);
+  --bs-btn-bg: transparent; --bs-btn-border-color: transparent;
+  --bs-btn-hover-color: #fff; --bs-btn-hover-bg: rgba(255, 255, 255, .07);
+  --bs-btn-hover-border-color: transparent;
+  border-radius: 999px !important; font-size: .72rem !important;
+  padding: .3rem .72rem !important; font-weight: 600;
+}
+.btn-group .btn-outline-secondary.active {
+  background: linear-gradient(135deg, rgba(79, 209, 197, .28), rgba(56, 189, 248, .18)) !important;
+  color: #fff !important; border-color: transparent !important;
+}
+
+/* --- 8. Страница управления: пресеты сверху, статус под ними ------------
+   Порядок и раскладка меняются только средствами grid/flex — разметка
+   Angular не трогается.                                                  */
+.top-cards {
+  grid-template-columns: 1fr !important;
+  gap: .8rem !important;
+}
+.top-cards .presets-card { order: -1; }
+.top-cards .status-card  { order: 0; min-height: 0 !important; }
+
+/* Пресеты — строка-тулбар: заголовок слева, ровная сетка кнопок во всю ширину */
+.presets-card {
+  min-height: 0 !important;
+  overflow: visible !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  flex-wrap: nowrap;
+  gap: 1rem !important;
+  padding: .7rem .9rem !important;
+}
+.presets-card > .d-flex { margin-bottom: 0 !important; flex: 0 0 auto; }
+.presets-card h3 {
+  font-size: .68rem !important; font-weight: 700 !important;
+  letter-spacing: .16em; text-transform: uppercase;
+  color: var(--pu-text-mute) !important; white-space: nowrap;
+}
+.presets-card .presets-buttons {
+  margin-top: 0 !important;
+  flex: 1 1 auto;
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: .45rem !important;
+}
+@media (max-width: 760px) {
+  .presets-card { flex-wrap: wrap; }
+  .presets-card .presets-buttons { flex-basis: 100%; }
+}
+.preset-btn {
+  background: rgba(255, 255, 255, .05) !important;
+  border: 1px solid var(--pu-line) !important;
+  color: var(--pu-text-dim) !important;
+  border-radius: var(--pu-r-sm) !important;
+  padding: .55rem .5rem !important;
+  min-width: 0 !important; width: 100%;
+  font-size: .82rem !important; letter-spacing: .04em !important;
+}
+.preset-btn:hover { background: rgba(255, 255, 255, .09) !important; color: #fff !important; }
+.preset-btn.selected {
+  background: linear-gradient(135deg, rgba(79, 209, 197, .32), rgba(56, 189, 248, .2)) !important;
+  border-color: rgba(125, 211, 252, .45) !important;
+  color: #fff !important;
+}
+
+/* Карточка статуса: шапка сверху, метрики слева, кнопки прижаты вправо */
+.status-card { padding: .9rem 1rem !important; }
+.status-card > div:not(.card-loading-overlay) {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: 'head head' 'data ctrl';
+  align-items: end;
+  column-gap: 1.2rem; row-gap: .6rem;
+}
+.status-card > div > .d-flex.justify-content-between { grid-area: head; margin-bottom: 0 !important; }
+.status-card .dryer-data { grid-area: data; margin-bottom: 0 !important; }
+.status-card .controls { grid-area: ctrl; }
+@media (max-width: 620px) {
+  .status-card > div:not(.card-loading-overlay) {
+    grid-template-columns: 1fr; grid-template-areas: 'head' 'data' 'ctrl';
+    align-items: stretch;
+  }
+}
+
+/* Кнопка «Back» — компактная, а не во всю ширину */
+.dryer-detail-page > .page-header .btn {
+  width: auto !important; display: inline-flex; align-items: center;
+  border-radius: 999px !important; padding: .4rem 1rem !important;
+  font-size: .8rem !important;
+  --bs-btn-color: var(--pu-text-dim);
+  --bs-btn-bg: rgba(255, 255, 255, .04);
+  --bs-btn-border-color: var(--pu-line);
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: rgba(255, 255, 255, .09);
+  --bs-btn-hover-border-color: var(--pu-line-2);
+}
+
+/* --- 9. График ----------------------------------------------------------
+   Highcharts рисует SVG, а CSS-свойства перебивают presentation-атрибуты,
+   поэтому цвет и толщина линий меняются без единой строчки JS.
+   Никаких filter/drop-shadow: на длинных сериях это заметно тормозит.   */
+.chart-container {
+  padding: .7rem .9rem 1rem !important;
+  height: 460px !important; min-height: 0 !important;
+}
+.highchart-root, #dryersHighchart, #singleDryerChart {
+  height: 100% !important; min-height: 0 !important;
+}
+.chart-card, .card:has(.chart-container) { min-height: 0 !important; }
+
+.highcharts-background { fill: transparent !important; }
+.highcharts-grid-line { stroke: rgba(255, 255, 255, .055) !important; }
+.highcharts-yaxis-grid .highcharts-grid-line { stroke-dasharray: 2 7; }
+.highcharts-axis-line, .highcharts-tick { stroke: rgba(255, 255, 255, .1) !important; }
+
+.highcharts-axis-labels text { fill: #8494a5 !important; font-size: 11px !important; }
+.highcharts-axis-title text {
+  fill: var(--pu-text-mute) !important; font-size: 11px !important;
+  letter-spacing: .06em; font-weight: 600 !important;
+}
+.highcharts-legend-item text { fill: var(--pu-text-dim) !important; font-size: 12px !important; }
+.highcharts-legend-item:hover text { fill: #fff !important; }
+
+.highcharts-graph { stroke-width: 2.2 !important; stroke-linecap: round; stroke-linejoin: round; }
+.highcharts-halo { fill-opacity: .16 !important; }
+
+/* Единая цветовая логика с плитками: температура — янтарь, влажность — бирюза.
+   Влажность у Highcharts идёт пунктиром (dashStyle: ShortDot) — по нему и
+   различаем серии, независимо от их порядка. Включается только когда сушилка
+   одна (нет третьей серии): при нескольких Highcharts сам разводит их по
+   цветам, и мешать ему нельзя. */
+.highcharts-series-group:not(:has(.highcharts-series-2)) .highcharts-graph:not([stroke-dasharray]) { stroke: var(--pu-heat) !important; }
+.highcharts-series-group:not(:has(.highcharts-series-2)) .highcharts-graph[stroke-dasharray] { stroke: var(--pu-hum) !important; }
+.highcharts-legend:not(:has(.highcharts-series-2)) .highcharts-series-0 .highcharts-graph { stroke: var(--pu-heat) !important; }
+.highcharts-legend:not(:has(.highcharts-series-2)) .highcharts-series-1 .highcharts-graph { stroke: var(--pu-hum) !important; }
+
+/* Тултип — стеклянная плашка. Цвета колонок T/H приходят инлайном из JS,
+   поэтому только !important; красим лишь когда в таблице одна строка. */
+.highcharts-tooltip-box {
+  fill: rgba(16, 22, 30, .94) !important;
+  stroke: rgba(125, 211, 252, .28) !important;
+  stroke-width: 1 !important;
+}
+.highcharts-tooltip span { color: var(--pu-text) !important; }
+.highcharts-tooltip table { font-size: 12px !important; }
+.highcharts-tooltip table:has(tr:only-child) td:nth-child(2) { color: var(--pu-heat) !important; }
+.highcharts-tooltip table:has(tr:only-child) td:nth-child(3) { color: var(--pu-hum) !important; }
+.highcharts-tooltip table b {
+  font-family: var(--pu-mono); font-variant-numeric: tabular-nums;
+  font-size: 13px; font-weight: 600;
+}
+
+.chart-initial-loading, .chart-loading-overlay, .card-loading-overlay {
+  background: rgba(11, 15, 22, .8) !important; border-radius: var(--pu-r) !important;
+}
+
+/* --- 10. Формы, списки, логи -------------------------------------------- */
+.form-control, .form-select, .input-group-text {
+  background-color: rgba(255, 255, 255, .05) !important;
+  border-color: var(--pu-line) !important;
+  color: var(--pu-text) !important;
+  border-radius: var(--pu-r-sm) !important;
+}
+.form-control:focus, .form-select:focus {
+  border-color: rgba(125, 211, 252, .5) !important;
+  box-shadow: 0 0 0 3px var(--bs-focus-ring-color) !important;
+}
+.form-control::placeholder { color: var(--pu-text-mute) !important; }
+.form-label { color: var(--pu-text-dim) !important; font-weight: 600; font-size: .8rem; }
+
+.list-group-item {
+  background: rgba(255, 255, 255, .04) !important;
+  border-color: var(--pu-line) !important; color: var(--pu-text) !important;
+}
+.list-group-item:hover { background: rgba(255, 255, 255, .08) !important; }
+
+.nav-tabs { border-bottom-color: var(--pu-line) !important; }
+.nav-tabs .nav-link {
+  color: var(--pu-text-dim) !important; border: 0 !important;
+  border-bottom: 2px solid transparent !important; font-weight: 600;
+}
+.nav-tabs .nav-link.active {
+  color: #fff !important; background: transparent !important;
+  border-bottom-color: var(--pu-hum) !important;
+}
+
+.macros-card, .embed-links-card { padding: .9rem 1rem !important; }
+.macros-card h3, .embed-links-card h3 { font-size: .88rem !important; }
+.macro-block, .url-block {
+  background: rgba(255, 255, 255, .04) !important;
+  border-color: var(--pu-line) !important; border-radius: var(--pu-r-sm) !important;
+  padding: .6rem !important;
+}
+.macro-code, .url-display {
+  background: rgba(6, 9, 14, .7) !important; border-color: var(--pu-line) !important;
+  border-radius: var(--pu-r-sm) !important; font-family: var(--pu-mono) !important;
+  font-size: .76rem !important;
+}
+.macro-code { color: #c9d6e2 !important; }
+.url-display code { color: var(--pu-accent) !important; font-family: var(--pu-mono) !important; }
+
+/* --- 11. Мелочи --------------------------------------------------------- */
+.skeleton-card { background: rgba(255, 255, 255, .04) !important; border-color: var(--pu-line) !important; border-radius: var(--pu-r) !important; }
+.skeleton-line { background: rgba(255, 255, 255, .07) !important; }
+.spinner-border { color: var(--pu-hum) !important; }
+.toast { background: var(--pu-glass-2) !important; backdrop-filter: blur(12px); border: 1px solid var(--pu-line) !important; border-radius: var(--pu-r-sm) !important; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .14); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .24); background-clip: padding-box; }
+* { scrollbar-color: rgba(255, 255, 255, .18) transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dryer-card, .btn, .preset-btn { transition: none !important; }
+  .status-active::before { animation: none !important; }
+}

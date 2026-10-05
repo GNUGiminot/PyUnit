@@ -1,0 +1,18 @@
+# Пример: тема и кнопка возврата для ОРИГИНАЛЬНОГО интерфейса PyUnit (:5000).
+# Скопируйте в каталог PyUnit как docker-compose.override.yml.
+# Образ не пересобирается: файлы монтируются поверх содержимого контейнера.
+# Откат: удалить файл и пересоздать контейнер (см. «Известные особенности»
+# в companion/README.md).
+#
+# Первые две строки — интерфейс, остальные — исправления бэкенда из ветки
+# (если каталог PyUnit — клон этого форка, файлы лежат прямо в api/).
+version: '3.3'
+
+services:
+  pyunit:
+    volumes:
+      - ./companion/legacy-overlay/pu-overlay.css:/app/web/dist/pyunit/browser/pu-overlay.css:ro
+      - ./companion/legacy-overlay/index.html:/app/web/dist/pyunit/browser/index.html:ro
+      - ./api/tools/dryer_control.py:/app/api/tools/dryer_control.py:ro
+      - ./api/workers/status_worker.py:/app/api/workers/status_worker.py:ro
+      - ./api/endpoints/dashboard_page.py:/app/api/endpoints/dashboard_page.py:ro
