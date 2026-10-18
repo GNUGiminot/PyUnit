@@ -27,11 +27,25 @@ from simple_pid import PID
 from collections import deque
 import statistics
 from datetime import datetime
+import time
 import json
 from api.cruds.preset_crud import preset_crud
 
 
 logger = get_logger("dryer")
+
+# --- Управление заслонкой (см. Dryer_control._servo_control) -----------------
+# Окно оценки тренда влажности. Меньше нельзя: за 30 с влажность в камере
+# физически почти не меняется, и решение принималось по шуму датчика
+# (заслонка открывалась и закрывалась каждые ~30 с, не успевая проветрить).
+SERVO_MIN_WINDOW_S = 180
+# После доезда заслонка стоит в новом положении хотя бы столько, прежде чем
+# снова принимать решение (ход 125->30 занимает ~16 с).
+SERVO_SETTLE_S = 20
+SERVO_MIN_DWELL_S = 60
+# Гистерезис для режимов «держать влажность в коридоре», %RH: без него при
+# влажности на пороге заслонка разворачивалась каждую секунду.
+SERVO_BAND_HYST = 0.3
 
 class Servo_control(object):
     """Servo control with fire-and-forget soft movement.
@@ -542,6 +556,12 @@ class Dryer_control(object):
         self.temperature_and_humidity: Optional[Temperature_and_humidity_control] = None
         # Servo control hysteresis helpers
         self._servo_last_action: Optional[datetime] = None
+        self._servo_last_cmd: Optional[float] = None      # monotonic, последняя команда заслонке
+        self._rh_hist: deque = deque(maxlen=3600)          # (monotonic, медиана RH) — тренд для заслонки
+        # Длительности фаз считаем по монотонным часам: у устройства нет RTC,
+        # и после синхронизации времени по сети стенные часы прыгают.
+        self._timer_mono: Optional[float] = None
+        self._drying_mono: Optional[float] = None
         # FIX: сериализует цикл воркера и команды из HTTP-эндпоинтов.
         # Без него Stop/Start посреди _apply_actuator_targets обнулял
         # current_preset / heater_pid, и следующая же строка падала с
@@ -666,14 +686,24 @@ class Dryer_control(object):
             self.humidity_pid = None
             self.time_left_drying = None
             self.time_drying_start = None
+            self._timer_mono = None
+            self._drying_mono = time.monotonic()
+            self._rh_hist.clear()
             await self.servo.close()
             self.current_preset = preset
         elif self.status == dryer_schema.DryerLogStatus.TIMER_DRYING:
             await self.servo.close()
             self.time_drying_start = datetime.utcnow()
+            self._timer_mono = time.monotonic()
             self.current_preset = preset
         elif self.status == dryer_schema.DryerLogStatus.HUMIDITY_STORAGE:
             await self.servo.close()
+            # FIX: хранение начинается без досушки; нагрев выключается здесь же,
+            # а не остаётся на уровне, выставленном в выдержке
+            self.time_drying_start = None
+            self._timer_mono = None
+            self.time_left_drying = None
+            await self.heater.set(0)
             self.current_preset = preset
         elif self.status == dryer_schema.DryerLogStatus.TEMPERATURE_STORAGE:
             await self.servo.close()
@@ -755,216 +785,203 @@ class Dryer_control(object):
         if self.heater_pid is None:
             self.heater_pid = Heater_PID(max_temperature)
 
+        rh = self.temperature_and_humidity.median_relative_humidity
+        if rh is None or self.temperature_and_humidity.temperature is None:
+            # FIX: без показаний датчика камеры регулировать нечем — раньше
+            # цикл падал на сравнении с None, оставляя нагреватель как был.
+            logger.warning("Chamber sensor has no data id=%s -> heater off", self.id)
+            await self.heater.set(0)
+            return
+        self._rh_hist.append((time.monotonic(), rh))
+        band = self.dryer_config.config.humidity.timer_drying_range
+        band_hi = self.current_preset.humidity + band
+        band_lo = self.current_preset.humidity - band
+
         if self.status == dryer_schema.DryerLogStatus.DRYING:
-            await self.heater_pid.update(self.current_preset.temperature, max_temperature=max_temperature)
-            await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
+            await self._heat_to(self.current_preset.temperature, max_temperature)
             await self._servo_control()
-            if self.current_preset.humidity >= self.temperature_and_humidity.median_relative_humidity:
+            if self.current_preset.humidity >= rh:
                 await self.set_status(dryer_schema.DryerLogStatus.TIMER_DRYING, self.current_preset)
+            elif self._drying_mono is not None and \
+                    time.monotonic() - self._drying_mono >= self.current_preset.dry_time * 60:
+                # FIX: если цель по влажности недостижима (сырая комната, мокрая
+                # катушка), прогрев длился бесконечно. Ограничиваем его временем
+                # пресета и переходим к отсчёту — сушка заведомо закончится.
+                logger.warning("Humidity target %s%% not reached in %s min (now %.1f%%) -> timer phase id=%s",
+                               self.current_preset.humidity, self.current_preset.dry_time, rh, self.id)
+                await self.set_status(dryer_schema.DryerLogStatus.TIMER_DRYING, self.current_preset)
+
         elif self.status == dryer_schema.DryerLogStatus.TIMER_DRYING:
-            target_relative_humidity_max = self.current_preset.humidity + \
-                self.dryer_config.config.humidity.timer_drying_range
-            target_relative_humidity_min = self.current_preset.humidity - \
-                self.dryer_config.config.humidity.timer_drying_range
-            if self.temperature_and_humidity.median_relative_humidity > target_relative_humidity_max:
-                max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
-                if max_temperature > self.heater.max_temperature:
-                    max_temperature = self.heater.max_temperature
-                await self.heater_pid.update(self.current_preset.temperature, max_temperature=max_temperature)
-                await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
+            if rh > band_hi:
+                await self._heat_to(self.current_preset.temperature, max_temperature)
                 await self._servo_control()
             else:
-                if self.humidity_pid == None:
-                    max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
-                    if max_temperature > self.heater.max_temperature:
-                        max_temperature = self.heater.max_temperature
-                    self.humidity_pid = humidity_PID(self.current_preset.humidity, 1, max_temperature)
-                pid_result = await self.humidity_pid.get(self.temperature_and_humidity.median_relative_humidity)
-                if pid_result == 1:
-                    max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
-                    if max_temperature > self.heater.max_temperature:
-                        max_temperature = self.heater.max_temperature
-                    await self.heater_pid.update(1, 1, max_temperature)
-                    await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
-                else:
-                    await self.heater.set(pid_result)
-                if self.temperature_and_humidity.median_relative_humidity < target_relative_humidity_min:
-                    await self.servo.open()
-                else:
-                    await self.servo.close()
-            if self.time_drying_start is None:
-                # Симметричная страховка: без точки отсчёта таймер не считаем.
+                await self._heat_by_humidity(max_temperature)
+                await self._servo_band(rh, band_lo)
+            if self._timer_mono is None:
+                self._timer_mono = time.monotonic()
                 self.time_drying_start = datetime.utcnow()
-            delta = datetime.utcnow() - self.time_drying_start
-            self.time_left_drying = self.current_preset.dry_time * 60 - delta.total_seconds()
-            if delta.total_seconds() >= self.current_preset.dry_time * 60:
+            elapsed = time.monotonic() - self._timer_mono
+            self.time_left_drying = self.current_preset.dry_time * 60 - elapsed
+            if elapsed >= self.current_preset.dry_time * 60:
+                self.time_left_drying = None
                 if self.current_preset.storage_type == preset_schema.PresetStorageType.HUMIDITY:
                     await self.set_status(dryer_schema.DryerLogStatus.HUMIDITY_STORAGE, self.current_preset)
-                    self.time_drying_start = None
-                    self.time_left_drying = None
                 elif self.current_preset.storage_type == preset_schema.PresetStorageType.TEMPERATURE:
                     await self.set_status(dryer_schema.DryerLogStatus.TEMPERATURE_STORAGE, self.current_preset)
-                    self.time_drying_start = None
-                    self.time_left_drying = None
                 else:
                     await self.set_status(dryer_schema.DryerLogStatus.PENDING)
-                    self.time_drying_start = None
-                    self.time_left_drying = None
+
         elif self.status == dryer_schema.DryerLogStatus.HUMIDITY_STORAGE:
-            target_relative_humidity_max = self.current_preset.humidity+self.dryer_config.config.humidity.timer_drying_range
-            target_relative_humidity_min = self.current_preset.humidity-self.dryer_config.config.humidity.timer_drying_range
-            if self.time_drying_start == None and self.temperature_and_humidity.median_relative_humidity < target_relative_humidity_max:
-                return
-            else:
-                if self.temperature_and_humidity.median_relative_humidity > target_relative_humidity_max+0.1:
+            # FIX: в простое (влажность в коридоре) нагрев раньше не выключался —
+            # оставалась уставка из выдержки, и камера часами стояла горячей.
+            # Теперь: досушка запускается, только когда влажность вышла за
+            # коридор, длится humidity_storage_dry_time (не меньше минуты),
+            # а в простое нагрев выключен и заслонка закрыта.
+            cycle_s = max(self.current_preset.humidity_storage_dry_time, 1) * 60
+            if self._timer_mono is None:
+                if rh > band_hi:
+                    self._timer_mono = time.monotonic()
                     self.time_drying_start = datetime.utcnow()
-                    max_temperature = self.current_preset.temperature + self.current_preset.max_temperature_delta
-                    if max_temperature > self.heater.max_temperature:
-                        max_temperature = self.heater.max_temperature
-                    await self.heater_pid.update(self.current_preset.temperature, max_temperature=max_temperature)
-                    await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
-                    await self._servo_control()
+                    logger.info("Storage re-dry start id=%s rh=%.1f > %.1f", self.id, rh, band_hi)
                 else:
-                    # FIX: humidity_pid создаётся только в ветке TIMER_DRYING.
-                    # Если досушка прошла целиком «по температуре» (влажность
-                    # ни разу не опускалась в полосу), сюда приходили с None.
-                    if self.humidity_pid is None:
-                        self.humidity_pid = humidity_PID(self.current_preset.humidity, 1, max_temperature)
-                    pid_result = await self.humidity_pid.get(self.temperature_and_humidity.median_relative_humidity)
-                    if pid_result == 1:
-                        await self.heater_pid.update(1, 1, max_temperature)
-                        await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
-                    else:
-                        await self.heater.set(pid_result)
-                    if self.temperature_and_humidity.median_relative_humidity < target_relative_humidity_min:
-                        await self.servo.open()
-                    else:
-                        await self.servo.close()
-            ##################################
-            # FIX: time_drying_start мог остаться None (влажность между
-            # target_max и target_max+0.1) -> вычитание из None роняло цикл.
-            if self.time_drying_start is None:
-                self.time_left_drying = None
-                return
-            delta = datetime.utcnow() - self.time_drying_start
-            # FIX: обратный отсчёт в режиме хранения считался по dry_time
-            # (180 мин у PLA) вместо humidity_storage_dry_time (10 мин),
-            # поэтому в интерфейсе показывалось заведомо неверное время,
-            # а затем уходило в минус.
-            self.time_left_drying = self.current_preset.humidity_storage_dry_time * 60 - delta.total_seconds()
-            if delta.total_seconds() >= self.current_preset.humidity_storage_dry_time * 60:
-                await self.heater.set(target=0)
-                # FIX: цикл досушки мог закончиться с открытой крышкой —
-                # хранение с открытой камерой лишено смысла.
-                await self.servo.close()
+                    await self.heater.set(0)
+                    if self.servo.desired_is_open:
+                        await self._servo_cmd(False, 'storage idle')
+                    self.time_left_drying = None
+                    return
+            if rh > band_hi:
+                await self._heat_to(self.current_preset.temperature, max_temperature)
+                await self._servo_control()
+            else:
+                await self._heat_by_humidity(max_temperature)
+                await self._servo_band(rh, band_lo)
+            elapsed = time.monotonic() - self._timer_mono
+            self.time_left_drying = cycle_s - elapsed
+            if elapsed >= cycle_s:
+                await self.heater.set(0)
+                if self.servo.desired_is_open:
+                    await self._servo_cmd(False, 'storage cycle end')
+                self._timer_mono = None
                 self.time_drying_start = None
                 self.time_left_drying = None
+
         elif self.status == dryer_schema.DryerLogStatus.TEMPERATURE_STORAGE:
-            # FIX: уставкой было preset.temperature (температура СУШКИ, 90 °C
-            # у PA), а storage_temperature использовалась лишь как нижний
-            # предел выхода PID. То есть «хранение при 70 °C», обещанное в
-            # интерфейсе, на деле держало камеру на 90 °C бесконечно.
-            # Теперь уставка = storage_temperature, нижний предел = 1.
             storage_target = self.current_preset.storage_temperature
-            if storage_target and storage_target > 0:
-                await self.heater_pid.update(storage_target, 1, max_temperature)
-            else:
-                await self.heater_pid.update(self.current_preset.temperature, 1, max_temperature)
-            await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
-            if self.temperature_and_humidity.median_relative_humidity > self.current_preset.humidity:
+            if not (storage_target and storage_target > 0):
+                storage_target = self.current_preset.temperature
+            await self._heat_to(storage_target, max_temperature)
+            if rh > self.current_preset.humidity:
                 await self._servo_control()
-            elif self.temperature_and_humidity.median_relative_humidity < self.current_preset.humidity:
-                await self.servo.open()
             else:
-                await self.servo.close()
+                await self._servo_band(rh, self.current_preset.humidity)
 
-    def moving_average(self, data):
-        return sum(data) / len(data)
+    # ------------------------------------------------------------------ нагрев
+    async def _heat_to(self, air_target: float, max_temperature: float):
+        """Держать ВОЗДУХ на air_target: PID по датчику камеры задаёт уставку
+        блока нагревателя (не выше max_temperature)."""
+        await self.heater_pid.update(air_target, 1, max_temperature)
+        await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
 
-    def is_plateau(self, smoothed_values: deque, threshold: int):
-        change = max(smoothed_values) - min(smoothed_values)
-        logger.debug(f'Open plateau change: {change}')
-        return change < threshold
+    async def _heat_by_humidity(self, max_temperature: float):
+        """Нагрев по влажности внутри коридора.
 
-    def is_falling_stopped(self, smoothed_values: deque, threshold: int):
-        change = smoothed_values[-1] - smoothed_values[0]
-        change = change * -1
-        if change <= -0.1:
-            return True
-        plateau_change = max(smoothed_values) - min(smoothed_values)
-        logger.debug(f'Close plateau change: {plateau_change}')
-        return change == plateau_change and plateau_change < threshold
+        FIX: раньше результат humidity-PID шёл прямо в уставку блока
+        нагревателя (до temperature + delta), минуя регулятор температуры
+        воздуха, и воздух перегревался выше заданного пресетом (у PETG до
+        ~70 °C при заданных 60). Теперь влажность задаёт уставку ВОЗДУХА в
+        пределах 1..temperature пресета, а блок по-прежнему ведёт PID воздуха.
+        """
+        air_max = float(self.current_preset.temperature)
+        if self.humidity_pid is None or tuple(self.humidity_pid.pid.output_limits) != (1, air_max):
+            self.humidity_pid = humidity_PID(self.current_preset.humidity, 1, air_max)
+        air_target = await self.humidity_pid.get(self.temperature_and_humidity.median_relative_humidity)
+        if air_target <= 1:
+            # влажность ниже цели — греть не нужно, нагреватель выключаем явно
+            await self.heater.set(0)
+            return
+        await self._heat_to(air_target, max_temperature)
+
+    # ------------------------------------------------------------------ заслонка
+    def _servo_moving(self) -> bool:
+        task = self.servo._soft_task
+        return task is not None and not task.done()
+
+    async def _servo_cmd(self, open_: bool, reason: str):
+        if open_:
+            await self.servo.open()
+        else:
+            await self.servo.close()
+        self._servo_last_cmd = time.monotonic()
+        self._servo_last_action = datetime.utcnow()
+        logger.info("Servo %s id=%s (%s)", 'OPEN' if open_ else 'CLOSE', self.id, reason)
+
+    def _rh_slope(self, since: float):
+        """Наклон медианы влажности, %RH в минуту, по точкам не раньше since."""
+        pts = [(t, v) for t, v in self._rh_hist if t >= since and v is not None]
+        if len(pts) < 10:
+            return None
+        n = float(len(pts))
+        mt = sum(t for t, _ in pts) / n
+        mv = sum(v for _, v in pts) / n
+        sxx = sum((t - mt) ** 2 for t, _ in pts)
+        if sxx <= 0:
+            return None
+        sxy = sum((t - mt) * (v - mv) for t, v in pts)
+        return sxy / sxx * 60.0
+
+    async def _servo_band(self, rh: float, low: float):
+        """Режим «держать влажность в коридоре»: открыть ниже нижней границы.
+
+        FIX: раньше команда давалась каждый тик без гистерезиса, и на пороге
+        заслонка разворачивалась каждую секунду. Теперь — гистерезис, запрет
+        решений во время хода и минимальное время стояния.
+        """
+        if self._servo_moving():
+            return
+        if self._servo_last_cmd is not None and time.monotonic() - self._servo_last_cmd < SERVO_MIN_DWELL_S:
+            return
+        if not self.servo.desired_is_open and rh < low:
+            await self._servo_cmd(True, 'band: rh %.1f < %.1f' % (rh, low))
+        elif self.servo.desired_is_open and rh >= low + SERVO_BAND_HYST:
+            await self._servo_cmd(False, 'band: rh %.1f >= %.1f' % (rh, low + SERVO_BAND_HYST))
 
     async def _servo_control(self):
-        humidity_cfg = self.dryer_config.config.humidity
-        humidity_values = self.temperature_and_humidity.relative_humidity_values
-        required = humidity_cfg.plateau_duration
-        if len(humidity_values) != required:
+        """Проветривание при сушке.
+
+        Замысел PyUnit: закрытая камера набирает влагу -> когда влажность
+        перестаёт падать, открыть и выпустить влажный воздух -> когда падение
+        от проветривания остановилось, закрыть.
+
+        FIX: прежняя реализация решала по окну 30 с, то есть по шуму датчика
+        (на устройстве сотни открытий за сушку, открытой заслонка стояла
+        секунды), и НЕ открывала заслонку при росте влажности в закрытой
+        камере — именно когда катушка отдаёт влагу и проветривать нужнее всего.
+        Теперь тренд считается линейной регрессией за окно не меньше
+        SERVO_MIN_WINDOW_S, причём только по данным после того, как заслонка
+        встала в текущее положение. «Падение остановилось» = наклон не круче
+        -порог/окно; это условие и открывает закрытую, и закрывает открытую.
+        """
+        cfg = self.dryer_config.config.humidity
+        if self._servo_moving():
             return
-
-        # FIX: не принимать новых решений, пока заслонка ещё едет.
-        # Ход 125->30 градусов при soft_step=3/soft_sleep=0.3 занимает ~16 с,
-        # а min_interval был 10 с: новая команда отменяла незавершённый ход
-        # (_soft_set_angle cancel'ит предыдущую задачу), и заслонка болталась
-        # между крайними положениями, ни разу их не достигая.
-        soft_task = self.servo._soft_task
-        if soft_task is not None and not soft_task.done():
-            logger.debug("Servo decision skipped: move in progress id=%s", self.id)
+        now = time.monotonic()
+        window = max(float(cfg.plateau_duration or 0), float(SERVO_MIN_WINDOW_S))
+        since = (self._servo_last_cmd + SERVO_SETTLE_S) if self._servo_last_cmd is not None else None
+        if not self._rh_hist or now - self._rh_hist[0][0] < window:
+            return                                   # мало истории после старта
+        if since is not None and now - since < max(window, SERVO_MIN_DWELL_S):
+            return                                   # после движения ещё не набралось окно
+        start = max(now - window, since if since is not None else now - window)
+        slope = self._rh_slope(start)
+        if slope is None:
             return
-
-        window = humidity_cfg.plateau_window_size
-        values_list = list(humidity_values)
-        smoothed_values = [
-            self.moving_average(values_list[i:i + window])
-            for i in range(required - window + 1)
-        ]
-
-        # Core metrics
-        amplitude = max(smoothed_values) - min(smoothed_values)
-        net_change = smoothed_values[-1] - smoothed_values[0]
-        falling_stopped = self.is_falling_stopped(smoothed_values, humidity_cfg.close_threshold)
-        open_plateau = self.is_plateau(smoothed_values, humidity_cfg.open_threshold)
-
-        now = datetime.utcnow()
-        if self._servo_last_action and (now - self._servo_last_action).total_seconds() < self.servo.servo.min_interval:
-            logger.debug(
-                "Servo action suppressed (cooldown) id=%s is_open=%s amp=%.3f net=%.3f openPlateau=%s fallingStopped=%s secsSince=%.1f",
-                self.id,
-                self.servo.desired_is_open,
-                amplitude,
-                net_change,
-                open_plateau,
-                falling_stopped,
-                (now - self._servo_last_action).total_seconds()
-            )
+        threshold = max(float(cfg.open_threshold or 0), 0.2) / (window / 60.0)   # %RH/мин
+        stalled = slope > -threshold
+        if not stalled:
             return
-
-        # Decision matrix
-        perform_open = (self.servo.desired_is_open is False) and open_plateau and not falling_stopped
-        perform_close = (self.servo.desired_is_open is True) and (falling_stopped or (open_plateau and falling_stopped))
-
-        # Refined close heuristic: if amplitude extremely low AND trend not decreasing further.
-        if perform_close:
-            await self.servo.close()
-            self._servo_last_action = now
-            logger.info(
-                "Servo CLOSE id=%s amp=%.3f net=%.3f openPlateau=%s fallingStopped=%s window=%s duration=%s",
-                self.id, amplitude, net_change, open_plateau, falling_stopped, window, required
-            )
-            return
-
-        if perform_open:
-            await self.servo.open()
-            self._servo_last_action = now
-            logger.info(
-                "Servo OPEN id=%s amp=%.3f net=%.3f openPlateau=%s fallingStopped=%s window=%s duration=%s",
-                self.id, amplitude, net_change, open_plateau, falling_stopped, window, required
-            )
-            return
-
-        # No action; emit a concise debug for traceability.
-        logger.debug(
-            "Servo noop id=%s is_open=%s amp=%.3f net=%.3f openPlateau=%s fallingStopped=%s window=%s duration=%s",
-            self.id, self.servo.desired_is_open, amplitude, net_change, open_plateau, falling_stopped, window, required
-        )
+        if self.servo.desired_is_open:
+            await self._servo_cmd(False, 'vent: fall stalled, slope %.3f %%/min' % slope)
+        else:
+            await self._servo_cmd(True, 'vent: rh not falling, slope %.3f %%/min' % slope)
 
