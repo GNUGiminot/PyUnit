@@ -45,6 +45,7 @@ class StatusWorker:
             self.db = get_db()
             start_time = datetime.utcnow()
             update_result: list[str] = []
+            loop_failed = False
             try:
                 async for session in self.db:
                     db_dryers = await common_crud.get_units(session)
@@ -60,8 +61,14 @@ class StatusWorker:
                             dryer = await self._add_Dryer(db_dryer.id)
                         try:
                             update_result.append(await dryer.update_status())
-                        except HTTPException:
-                            logger.error("Dryer missing during update dryer_id=%s", db_dryer.id)
+                        except HTTPException as e:
+                            # FIX v3: сюда же попадают ВСЕ ошибки Moonraker/Klipper
+                            # (moonraker_api превращает их в HTTPException). Раньше
+                            # они писались как «Dryer missing» и fail-safe не
+                            # срабатывал: нагреватель оставался на прежней уставке.
+                            logger.error("Dryer update failed dryer_id=%s status=%s detail=%s",
+                                         db_dryer.id, e.status_code, e.detail)
+                            loop_failed = True
                 if update_result:
                     update_result_str = ','.join(update_result)
                     aggregated_json = f'[{update_result_str}]'
@@ -86,7 +93,10 @@ class StatusWorker:
                             
                 # Цикл дошёл до конца без исключений — сбрасываем счётчик
                 # подряд идущих сбоев fail-safe.
-                self._consecutive_errors = 0
+                if loop_failed:
+                    await self._on_data_error()
+                else:
+                    self._consecutive_errors = 0
                 end_time = datetime.utcnow()
                 delta_time = end_time - start_time
                 # Aim for ~1 second loop time

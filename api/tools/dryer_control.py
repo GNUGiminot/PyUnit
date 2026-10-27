@@ -46,6 +46,24 @@ SERVO_AH_FALL = 0.05       # г/м³ в минуту: медленнее — п�
 SERVO_MAX_OPEN_S = 600     # дольше не держим открытой (теряем тепло)
 SERVO_BACKOFF_S = (300, 1800)  # пауза, если проветривание не помогло: от 5 до 30 мин
 
+# --- Прогрев -> выдержка --------------------------------------------------------
+# Цель по влажности бывает недостижима: при 50 °C комнатный воздух даёт
+# 12-15 %, и пресет с целью 10 % прогревался бы до аварийного предела dry_time.
+# Если воздух уже на температуре, а влажность перестала падать — выходим на
+# выдержку.
+DRY_PLATEAU_S = 1200       # столько воздух на температуре и влажность не улучшается
+DRY_PLATEAU_RH = 0.5       # %: меньшее снижение влажности улучшением не считается
+DRY_AT_TEMP_C = 2.0        # «на температуре» — не дальше этого от уставки
+AIR_OVERHEAT_C = 2.0       # воздух выше потолка блока на столько — авария, нагрев выкл
+
+
+def _ah_per_rh_step(temperature: float) -> float:
+    """Сколько г/м³ даёт шаг датчика 0.1 % RH при этой температуре.
+    При 60 °C ~0.13, при 85 °C ~0.35 — порог проветривания должен быть больше
+    шума округления, иначе на горячих пресетах заслонка дёргается от него."""
+    es = 6.112 * (2.71828 ** ((17.67 * temperature) / (temperature + 243.5)))
+    return es * 0.1 * 2.1674 / (273.15 + temperature)
+
 class Servo_control(object):
     """Servo control with fire-and-forget soft movement.
 
@@ -565,6 +583,9 @@ class Dryer_control(object):
         # и после синхронизации времени по сети стенные часы прыгают.
         self._timer_mono: Optional[float] = None
         self._drying_mono: Optional[float] = None
+        self._at_temp_mono: Optional[float] = None         # прогрев: воздух впервые вышел на температуру
+        self._rh_best: Optional[float] = None              # прогрев: лучшая (низшая) влажность
+        self._rh_best_mono: Optional[float] = None
         # FIX: сериализует цикл воркера и команды из HTTP-эндпоинтов.
         # Без него Stop/Start посреди _apply_actuator_targets обнулял
         # current_preset / heater_pid, и следующая же строка падала с
@@ -637,6 +658,12 @@ class Dryer_control(object):
                                 await self.set_status(dryer_schema.DryerLogStatus.PENDING)
                         if (self.status == dryer_schema.DryerLogStatus.TIMER_DRYING and current_preset.humidity < self.temperature_and_humidity.relative_humidity):
                             await self.set_status(dryer_schema.DryerLogStatus.DRYING, current_preset)
+                        # FIX v3: потолок блока PID запоминает при создании —
+                        # после правки температуры пресета посреди сушки он
+                        # оставался старым. Пересоздаём.
+                        if (current_preset.temperature != self.current_preset.temperature or
+                                current_preset.max_temperature_delta != self.current_preset.max_temperature_delta):
+                            self.heater_pid = None
                         self.current_preset = current_preset
                         logger.info("Dryer preset reloaded id=%s preset=%s", self.id, self.current_preset.id)
 
@@ -696,15 +723,18 @@ class Dryer_control(object):
             self._vent_ah_open = None
             self._vent_backoff = 0.0
             self._vent_backoff_until = None
+            self._at_temp_mono = None
+            self._rh_best = None
+            self._rh_best_mono = None
             await self.servo.close()
             self.current_preset = preset
         elif self.status == dryer_schema.DryerLogStatus.TIMER_DRYING:
-            await self.servo.close()
+            await self._close_on_phase_change()
             self.time_drying_start = datetime.utcnow()
             self._timer_mono = time.monotonic()
             self.current_preset = preset
         elif self.status == dryer_schema.DryerLogStatus.HUMIDITY_STORAGE:
-            await self.servo.close()
+            await self._close_on_phase_change()
             # FIX: хранение начинается без досушки; нагрев выключается здесь же,
             # а не остаётся на уровне, выставленном в выдержке
             self.time_drying_start = None
@@ -713,7 +743,7 @@ class Dryer_control(object):
             await self.heater.set(0)
             self.current_preset = preset
         elif self.status == dryer_schema.DryerLogStatus.TEMPERATURE_STORAGE:
-            await self.servo.close()
+            await self._close_on_phase_change()
             self.current_preset = preset
         logger.debug("Status handlers applied id=%s status=%s current_preset=%s", self.id, self.status, getattr(self.current_preset, 'id', None))
 
@@ -770,9 +800,13 @@ class Dryer_control(object):
         # Decide and apply control outputs based on status
         logger.debug("Apply actuators start id=%s status=%s", self.id, self.status)
         if self.status == dryer_schema.DryerLogStatus.PENDING:
-            if self.heater.is_on == True:
+            # FIX v3: проверяем уставку, а не «греет ли сейчас»: после
+            # перезапуска PyUnit посреди сушки уставка в Klipper остаётся, и
+            # пока блок горячее её, is_on == False — нагрев не снимался.
+            # heater.set(0) сам ничего не шлёт, если уставка уже 0.
+            if self.heater.target:
                 logger.info("Heater off due to PENDING id=%s", self.id)
-                await self.heater.set(0)
+            await self.heater.set(0)
             return
         # FIX: страховка от рассинхрона состояния — любой не-PENDING режим
         # обязан иметь пресет. Раньше отсутствие пресета роняло цикл.
@@ -802,7 +836,11 @@ class Dryer_control(object):
         ah = self.temperature_and_humidity.median_absolute_humidity
         if ah is not None:
             self._ah_hist.append((time.monotonic(), ah))
-        band_hi = self.current_preset.humidity + self.dryer_config.config.humidity.timer_drying_range
+        # FIX v3: коридор хранения — из пресета («допустимый уход влажности
+        # при хранении»); оригинал это поле не читал. 0 — общий из настроек.
+        storage_range = self.current_preset.humidity_storage_range or \
+            self.dryer_config.config.humidity.timer_drying_range
+        band_hi = self.current_preset.humidity + storage_range
 
         # FIX v2: на этапах сушки нагрев всегда держит ВОЗДУХ на температуре
         # пресета. Раньше на выдержке нагрев шёл «по влажности»: как только
@@ -811,7 +849,20 @@ class Dryer_control(object):
         if self.status == dryer_schema.DryerLogStatus.DRYING:
             await self._heat_to(self.current_preset.temperature, max_temperature)
             await self._vent_control()
+            now = time.monotonic()
+            if abs(self.temperature_and_humidity.temperature - self.current_preset.temperature) <= DRY_AT_TEMP_C \
+                    and self._at_temp_mono is None:
+                self._at_temp_mono = now
+            if self._rh_best is None or rh < self._rh_best - DRY_PLATEAU_RH:
+                self._rh_best, self._rh_best_mono = rh, now
             if self.current_preset.humidity >= rh:
+                await self.set_status(dryer_schema.DryerLogStatus.TIMER_DRYING, self.current_preset)
+            elif self._at_temp_mono is not None and now - self._at_temp_mono >= DRY_PLATEAU_S \
+                    and now - self._rh_best_mono >= DRY_PLATEAU_S:
+                # FIX v3: воздух на температуре, а влажность давно не падает —
+                # ниже она при этом нагреве уже не станет
+                logger.info("Humidity plateau %.1f%% (target %s%%) at temperature -> timer phase id=%s",
+                            rh, self.current_preset.humidity, self.id)
                 await self.set_status(dryer_schema.DryerLogStatus.TIMER_DRYING, self.current_preset)
             elif self._drying_mono is not None and \
                     time.monotonic() - self._drying_mono >= self.current_preset.dry_time * 60:
@@ -877,6 +928,13 @@ class Dryer_control(object):
     async def _heat_to(self, air_target: float, max_temperature: float):
         """Держать ВОЗДУХ на air_target: PID по датчику камеры задаёт уставку
         блока нагревателя (не выше max_temperature)."""
+        air = self.temperature_and_humidity.temperature
+        if air >= max_temperature + AIR_OVERHEAT_C:
+            # Воздух не может быть горячее блока, а блок не выше потолка.
+            # Раз так — датчик или нагреватель ведут себя не так, как думаем.
+            logger.error("Air %.1f C above heater ceiling %.1f C id=%s -> heater off", air, max_temperature, self.id)
+            await self.heater.set(0)
+            return
         await self.heater_pid.update(air_target, 1, max_temperature)
         await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
 
@@ -894,6 +952,20 @@ class Dryer_control(object):
         self._servo_last_cmd = time.monotonic()
         self._servo_last_action = datetime.utcnow()
         logger.info("Servo %s id=%s (%s)", 'OPEN' if open_ else 'CLOSE', self.id, reason)
+
+    async def _close_on_phase_change(self):
+        """Смена этапа закрывает заслонку; если она была открыта
+        проветриванием — через _servo_cmd, чтобы учёт проветривания не
+        считал её открытой и начал копить влагу заново."""
+        if self.servo.desired_is_open:
+            await self._servo_cmd(False, 'phase change')
+        else:
+            await self.servo.close()
+
+    def _vent_rise(self) -> float:
+        """Порог «накопилось влаги»: не меньше двух шагов округления датчика."""
+        t = self.temperature_and_humidity.temperature or 0.0
+        return max(SERVO_AH_RISE, 2 * _ah_per_rh_step(t))
 
     def _ah_slope(self, since: float):
         """Наклон абсолютной влажности, г/м³ в минуту, по точкам не раньше since."""
@@ -940,7 +1012,7 @@ class Dryer_control(object):
                 return
             if self._vent_backoff_until is not None and now < self._vent_backoff_until:
                 return
-            if ah - self._vent_ah_min >= SERVO_AH_RISE:
+            if ah - self._vent_ah_min >= self._vent_rise():
                 self._vent_ah_open = ah
                 await self._servo_cmd(True, 'vent: water %.1f g/m3, +%.1f since close' % (ah, ah - self._vent_ah_min))
             return
@@ -955,7 +1027,7 @@ class Dryer_control(object):
         if not (stalled or open_for >= SERVO_MAX_OPEN_S):
             return
         gain = (self._vent_ah_open - ah) if self._vent_ah_open is not None else 0.0
-        if gain < SERVO_AH_RISE / 2:
+        if gain < self._vent_rise() / 2:
             self._vent_backoff = min(max(self._vent_backoff * 2, SERVO_BACKOFF_S[0]), SERVO_BACKOFF_S[1])
         else:
             self._vent_backoff = 0.0
