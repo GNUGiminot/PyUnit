@@ -34,18 +34,17 @@ from api.cruds.preset_crud import preset_crud
 
 logger = get_logger("dryer")
 
-# --- Управление заслонкой (см. Dryer_control._servo_control) -----------------
-# Окно оценки тренда влажности. Меньше нельзя: за 30 с влажность в камере
-# физически почти не меняется, и решение принималось по шуму датчика
-# (заслонка открывалась и закрывалась каждые ~30 с, не успевая проветрить).
-SERVO_MIN_WINDOW_S = 180
-# После доезда заслонка стоит в новом положении хотя бы столько, прежде чем
-# снова принимать решение (ход 125->30 занимает ~16 с).
-SERVO_SETTLE_S = 20
-SERVO_MIN_DWELL_S = 60
-# Гистерезис для режимов «держать влажность в коридоре», %RH: без него при
-# влажности на пороге заслонка разворачивалась каждую секунду.
-SERVO_BAND_HYST = 0.3
+# --- Проветривание (см. Dryer_control._vent_control) ---------------------------
+# Решение принимается по АБСОЛЮТНОЙ влажности камеры (г/м³ — сколько воды в
+# воздухе). Относительная влажность падает просто от нагрева и о том, сколько
+# влаги отдала катушка, не говорит.
+SERVO_SETTLE_S = 20        # после команды: заслонка доезжает (~16 с)
+SERVO_MIN_DWELL_S = 60     # в каждом положении не меньше
+SERVO_AH_RISE = 0.3        # г/м³: столько влаги накопилось в закрытой камере -> проветрить
+SERVO_TREND_S = 120        # окно, по которому судим, что падение при проветривании кончилось
+SERVO_AH_FALL = 0.05       # г/м³ в минуту: медленнее — проветривание больше не помогает
+SERVO_MAX_OPEN_S = 600     # дольше не держим открытой (теряем тепло)
+SERVO_BACKOFF_S = (300, 1800)  # пауза, если проветривание не помогло: от 5 до 30 мин
 
 class Servo_control(object):
     """Servo control with fire-and-forget soft movement.
@@ -557,7 +556,11 @@ class Dryer_control(object):
         # Servo control hysteresis helpers
         self._servo_last_action: Optional[datetime] = None
         self._servo_last_cmd: Optional[float] = None      # monotonic, последняя команда заслонке
-        self._rh_hist: deque = deque(maxlen=3600)          # (monotonic, медиана RH) — тренд для заслонки
+        self._ah_hist: deque = deque(maxlen=3600)          # (monotonic, медиана абс. влажности) — для заслонки
+        self._vent_ah_min: Optional[float] = None          # минимум влаги с момента закрытия
+        self._vent_ah_open: Optional[float] = None         # влага в момент открытия
+        self._vent_backoff: float = 0.0
+        self._vent_backoff_until: Optional[float] = None
         # Длительности фаз считаем по монотонным часам: у устройства нет RTC,
         # и после синхронизации времени по сети стенные часы прыгают.
         self._timer_mono: Optional[float] = None
@@ -688,7 +691,11 @@ class Dryer_control(object):
             self.time_drying_start = None
             self._timer_mono = None
             self._drying_mono = time.monotonic()
-            self._rh_hist.clear()
+            self._ah_hist.clear()
+            self._vent_ah_min = None
+            self._vent_ah_open = None
+            self._vent_backoff = 0.0
+            self._vent_backoff_until = None
             await self.servo.close()
             self.current_preset = preset
         elif self.status == dryer_schema.DryerLogStatus.TIMER_DRYING:
@@ -792,32 +799,31 @@ class Dryer_control(object):
             logger.warning("Chamber sensor has no data id=%s -> heater off", self.id)
             await self.heater.set(0)
             return
-        self._rh_hist.append((time.monotonic(), rh))
-        band = self.dryer_config.config.humidity.timer_drying_range
-        band_hi = self.current_preset.humidity + band
-        band_lo = self.current_preset.humidity - band
+        ah = self.temperature_and_humidity.median_absolute_humidity
+        if ah is not None:
+            self._ah_hist.append((time.monotonic(), ah))
+        band_hi = self.current_preset.humidity + self.dryer_config.config.humidity.timer_drying_range
 
+        # FIX v2: на этапах сушки нагрев всегда держит ВОЗДУХ на температуре
+        # пресета. Раньше на выдержке нагрев шёл «по влажности»: как только
+        # относительная влажность опускалась до цели (на жаре это минуты),
+        # нагреватель выключался, хотя катушка сохнет только в тепле.
         if self.status == dryer_schema.DryerLogStatus.DRYING:
             await self._heat_to(self.current_preset.temperature, max_temperature)
-            await self._servo_control()
+            await self._vent_control()
             if self.current_preset.humidity >= rh:
                 await self.set_status(dryer_schema.DryerLogStatus.TIMER_DRYING, self.current_preset)
             elif self._drying_mono is not None and \
                     time.monotonic() - self._drying_mono >= self.current_preset.dry_time * 60:
-                # FIX: если цель по влажности недостижима (сырая комната, мокрая
-                # катушка), прогрев длился бесконечно. Ограничиваем его временем
-                # пресета и переходим к отсчёту — сушка заведомо закончится.
+                # если цель по влажности недостижима (сырая комната, мокрая
+                # катушка), прогрев не должен длиться бесконечно
                 logger.warning("Humidity target %s%% not reached in %s min (now %.1f%%) -> timer phase id=%s",
                                self.current_preset.humidity, self.current_preset.dry_time, rh, self.id)
                 await self.set_status(dryer_schema.DryerLogStatus.TIMER_DRYING, self.current_preset)
 
         elif self.status == dryer_schema.DryerLogStatus.TIMER_DRYING:
-            if rh > band_hi:
-                await self._heat_to(self.current_preset.temperature, max_temperature)
-                await self._servo_control()
-            else:
-                await self._heat_by_humidity(max_temperature)
-                await self._servo_band(rh, band_lo)
+            await self._heat_to(self.current_preset.temperature, max_temperature)
+            await self._vent_control()
             if self._timer_mono is None:
                 self._timer_mono = time.monotonic()
                 self.time_drying_start = datetime.utcnow()
@@ -833,11 +839,9 @@ class Dryer_control(object):
                     await self.set_status(dryer_schema.DryerLogStatus.PENDING)
 
         elif self.status == dryer_schema.DryerLogStatus.HUMIDITY_STORAGE:
-            # FIX: в простое (влажность в коридоре) нагрев раньше не выключался —
-            # оставалась уставка из выдержки, и камера часами стояла горячей.
-            # Теперь: досушка запускается, только когда влажность вышла за
-            # коридор, длится humidity_storage_dry_time (не меньше минуты),
-            # а в простое нагрев выключен и заслонка закрыта.
+            # Хранение: в простое нагрев выключен и заслонка закрыта. Если
+            # влажность вышла за коридор — досушка при температуре пресета
+            # на humidity_storage_dry_time (не меньше минуты).
             cycle_s = max(self.current_preset.humidity_storage_dry_time, 1) * 60
             if self._timer_mono is None:
                 if rh > band_hi:
@@ -846,16 +850,12 @@ class Dryer_control(object):
                     logger.info("Storage re-dry start id=%s rh=%.1f > %.1f", self.id, rh, band_hi)
                 else:
                     await self.heater.set(0)
-                    if self.servo.desired_is_open:
+                    if self.servo.desired_is_open and not self._servo_moving():
                         await self._servo_cmd(False, 'storage idle')
                     self.time_left_drying = None
                     return
-            if rh > band_hi:
-                await self._heat_to(self.current_preset.temperature, max_temperature)
-                await self._servo_control()
-            else:
-                await self._heat_by_humidity(max_temperature)
-                await self._servo_band(rh, band_lo)
+            await self._heat_to(self.current_preset.temperature, max_temperature)
+            await self._vent_control()
             elapsed = time.monotonic() - self._timer_mono
             self.time_left_drying = cycle_s - elapsed
             if elapsed >= cycle_s:
@@ -871,10 +871,7 @@ class Dryer_control(object):
             if not (storage_target and storage_target > 0):
                 storage_target = self.current_preset.temperature
             await self._heat_to(storage_target, max_temperature)
-            if rh > self.current_preset.humidity:
-                await self._servo_control()
-            else:
-                await self._servo_band(rh, self.current_preset.humidity)
+            await self._vent_control()
 
     # ------------------------------------------------------------------ нагрев
     async def _heat_to(self, air_target: float, max_temperature: float):
@@ -882,25 +879,6 @@ class Dryer_control(object):
         блока нагревателя (не выше max_temperature)."""
         await self.heater_pid.update(air_target, 1, max_temperature)
         await self.heater.set(await self.heater_pid.get(self.temperature_and_humidity.temperature))
-
-    async def _heat_by_humidity(self, max_temperature: float):
-        """Нагрев по влажности внутри коридора.
-
-        FIX: раньше результат humidity-PID шёл прямо в уставку блока
-        нагревателя (до temperature + delta), минуя регулятор температуры
-        воздуха, и воздух перегревался выше заданного пресетом (у PETG до
-        ~70 °C при заданных 60). Теперь влажность задаёт уставку ВОЗДУХА в
-        пределах 1..temperature пресета, а блок по-прежнему ведёт PID воздуха.
-        """
-        air_max = float(self.current_preset.temperature)
-        if self.humidity_pid is None or tuple(self.humidity_pid.pid.output_limits) != (1, air_max):
-            self.humidity_pid = humidity_PID(self.current_preset.humidity, 1, air_max)
-        air_target = await self.humidity_pid.get(self.temperature_and_humidity.median_relative_humidity)
-        if air_target <= 1:
-            # влажность ниже цели — греть не нужно, нагреватель выключаем явно
-            await self.heater.set(0)
-            return
-        await self._heat_to(air_target, max_temperature)
 
     # ------------------------------------------------------------------ заслонка
     def _servo_moving(self) -> bool:
@@ -912,13 +890,14 @@ class Dryer_control(object):
             await self.servo.open()
         else:
             await self.servo.close()
+            self._vent_ah_min = None
         self._servo_last_cmd = time.monotonic()
         self._servo_last_action = datetime.utcnow()
         logger.info("Servo %s id=%s (%s)", 'OPEN' if open_ else 'CLOSE', self.id, reason)
 
-    def _rh_slope(self, since: float):
-        """Наклон медианы влажности, %RH в минуту, по точкам не раньше since."""
-        pts = [(t, v) for t, v in self._rh_hist if t >= since and v is not None]
+    def _ah_slope(self, since: float):
+        """Наклон абсолютной влажности, г/м³ в минуту, по точкам не раньше since."""
+        pts = [(t, v) for t, v in self._ah_hist if t >= since]
         if len(pts) < 10:
             return None
         n = float(len(pts))
@@ -930,58 +909,56 @@ class Dryer_control(object):
         sxy = sum((t - mt) * (v - mv) for t, v in pts)
         return sxy / sxx * 60.0
 
-    async def _servo_band(self, rh: float, low: float):
-        """Режим «держать влажность в коридоре»: открыть ниже нижней границы.
+    async def _vent_control(self):
+        """Проветривание камеры.
 
-        FIX: раньше команда давалась каждый тик без гистерезиса, и на пороге
-        заслонка разворачивалась каждую секунду. Теперь — гистерезис, запрет
-        решений во время хода и минимальное время стояния.
+        Закрыта: катушка отдаёт воду, и её количество в воздухе (абсолютная
+        влажность) растёт. Накопилось SERVO_AH_RISE с момента закрытия ->
+        открыть и выпустить влажный воздух.
+        Открыта: влага уходит; когда падение остановилось (или открыта уже
+        SERVO_MAX_OPEN_S) -> закрыть. Если проветривание почти ничего не
+        дало (в комнате воздух не суше, чем в камере), следующее откладываем,
+        с каждым разом дольше — чтобы не гонять заслонку и не терять тепло.
+
+        FIX v2: раньше решение принималось по относительной влажности. Она
+        падает просто от нагрева, поэтому на прогреве и выдержке заслонка
+        почти никогда не открывалась.
         """
         if self._servo_moving():
             return
-        if self._servo_last_cmd is not None and time.monotonic() - self._servo_last_cmd < SERVO_MIN_DWELL_S:
-            return
-        if not self.servo.desired_is_open and rh < low:
-            await self._servo_cmd(True, 'band: rh %.1f < %.1f' % (rh, low))
-        elif self.servo.desired_is_open and rh >= low + SERVO_BAND_HYST:
-            await self._servo_cmd(False, 'band: rh %.1f >= %.1f' % (rh, low + SERVO_BAND_HYST))
-
-    async def _servo_control(self):
-        """Проветривание при сушке.
-
-        Замысел PyUnit: закрытая камера набирает влагу -> когда влажность
-        перестаёт падать, открыть и выпустить влажный воздух -> когда падение
-        от проветривания остановилось, закрыть.
-
-        FIX: прежняя реализация решала по окну 30 с, то есть по шуму датчика
-        (на устройстве сотни открытий за сушку, открытой заслонка стояла
-        секунды), и НЕ открывала заслонку при росте влажности в закрытой
-        камере — именно когда катушка отдаёт влагу и проветривать нужнее всего.
-        Теперь тренд считается линейной регрессией за окно не меньше
-        SERVO_MIN_WINDOW_S, причём только по данным после того, как заслонка
-        встала в текущее положение. «Падение остановилось» = наклон не круче
-        -порог/окно; это условие и открывает закрытую, и закрывает открытую.
-        """
-        cfg = self.dryer_config.config.humidity
-        if self._servo_moving():
+        ah = self.temperature_and_humidity.median_absolute_humidity
+        if ah is None:
             return
         now = time.monotonic()
-        window = max(float(cfg.plateau_duration or 0), float(SERVO_MIN_WINDOW_S))
-        since = (self._servo_last_cmd + SERVO_SETTLE_S) if self._servo_last_cmd is not None else None
-        if not self._rh_hist or now - self._rh_hist[0][0] < window:
-            return                                   # мало истории после старта
-        if since is not None and now - since < max(window, SERVO_MIN_DWELL_S):
-            return                                   # после движения ещё не набралось окно
-        start = max(now - window, since if since is not None else now - window)
-        slope = self._rh_slope(start)
-        if slope is None:
+        last = self._servo_last_cmd
+        if last is not None and now - last < SERVO_SETTLE_S:
             return
-        threshold = max(float(cfg.open_threshold or 0), 0.2) / (window / 60.0)   # %RH/мин
-        stalled = slope > -threshold
-        if not stalled:
+        if not self.servo.desired_is_open:
+            if self._vent_ah_min is None or ah < self._vent_ah_min:
+                self._vent_ah_min = ah
+            if last is not None and now - last < SERVO_MIN_DWELL_S:
+                return
+            if self._vent_backoff_until is not None and now < self._vent_backoff_until:
+                return
+            if ah - self._vent_ah_min >= SERVO_AH_RISE:
+                self._vent_ah_open = ah
+                await self._servo_cmd(True, 'vent: water %.1f g/m3, +%.1f since close' % (ah, ah - self._vent_ah_min))
             return
-        if self.servo.desired_is_open:
-            await self._servo_cmd(False, 'vent: fall stalled, slope %.3f %%/min' % slope)
+        open_for = now - last if last is not None else SERVO_MAX_OPEN_S
+        if open_for < SERVO_MIN_DWELL_S:
+            return
+        since = (last if last is not None else now) + SERVO_SETTLE_S
+        slope = None
+        if now - since >= SERVO_TREND_S:
+            slope = self._ah_slope(now - SERVO_TREND_S)
+        stalled = slope is not None and slope > -SERVO_AH_FALL
+        if not (stalled or open_for >= SERVO_MAX_OPEN_S):
+            return
+        gain = (self._vent_ah_open - ah) if self._vent_ah_open is not None else 0.0
+        if gain < SERVO_AH_RISE / 2:
+            self._vent_backoff = min(max(self._vent_backoff * 2, SERVO_BACKOFF_S[0]), SERVO_BACKOFF_S[1])
         else:
-            await self._servo_cmd(True, 'vent: rh not falling, slope %.3f %%/min' % slope)
-
+            self._vent_backoff = 0.0
+        self._vent_backoff_until = now + self._vent_backoff if self._vent_backoff else None
+        await self._servo_cmd(False, 'vent done: water %.1f g/m3 (-%.1f), next pause %ds'
+                              % (ah, gain, int(self._vent_backoff)))
